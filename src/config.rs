@@ -40,7 +40,8 @@ pub struct Config {
     pub timeout_ms: u32,
     /// The link token of contract revision 6.
     pub token_auth: bool,
-    /// token_auth: the endpoint file; "" means `endpoint.json` in the plugin's data folder.
+    /// token_auth: the name of the endpoint file in the plugin's data folder; "" means `endpoint.json`.
+    /// A plugin sees no other folder (CONTRACT 6.2 leaves the place to the application).
     pub endpoint_file: String,
 }
 
@@ -87,6 +88,17 @@ fn str_of(o: &Map<String, Value>, k: &str, d: &str) -> Result<String, String> {
         Some(Value::String(s)) => Ok(s.clone()),
         Some(_) => Err(format!("\"{k}\" must be a string")),
     }
+}
+
+/// A file name inside the data folder: the sandbox shows the plugin that folder and nothing else.
+fn file_name_of(o: &Map<String, Value>, k: &str) -> Result<String, String> {
+    let s = str_of(o, k, "")?;
+    if s.contains(['/', '\\', '\0']) || s == "." || s == ".." {
+        return Err(format!(
+            "\"{k}\" must be a file name inside the plugin's data folder, not a path"
+        ));
+    }
+    Ok(s)
 }
 
 fn num_of(o: &Map<String, Value>, k: &str, d: f64) -> Result<f64, String> {
@@ -166,7 +178,7 @@ impl Config {
             heartbeat_ms: int_of(o, "heartbeat_ms", 250, lo, hi)? as u32,
             timeout_ms: int_of(o, "timeout_ms", 2000, 0, u64::from(u32::MAX))? as u32,
             token_auth: bool_of(o, "token_auth", false)?,
-            endpoint_file: str_of(o, "endpoint_file", "")?,
+            endpoint_file: file_name_of(o, "endpoint_file")?,
         })
     }
 
@@ -223,7 +235,7 @@ mod tests {
     fn keys_are_read_and_unknown_keys_ignored() {
         let c = Config::parse(
             r#"{"role":"guest","port":47811,"flip_x":true,"scale":2.5,"offset":[0,-4,0],
-                "token_auth":true,"endpoint_file":"/run/x.json","future_key":[1,2],"auto_start":true}"#,
+                "token_auth":true,"endpoint_file":"x.json","future_key":[1,2],"auto_start":true}"#,
         )
         .unwrap();
         assert_eq!(c.role, Role::Guest);
@@ -232,7 +244,7 @@ mod tests {
         assert_eq!(c.mapping.scale, 2.5);
         assert_eq!(c.mapping.offset, [0.0, -4.0, 0.0]);
         assert!(c.token_auth && c.auto_start);
-        assert_eq!(c.endpoint_file, "/run/x.json");
+        assert_eq!(c.endpoint_file, "x.json");
     }
 
     #[test]
@@ -256,6 +268,9 @@ mod tests {
             (r#"{"heartbeat_ms":5}"#, "heartbeat_ms"),
             (r#"{"heartbeat_ms":10001}"#, "heartbeat_ms"),
             (r#"{"token_auth":"yes"}"#, "token_auth"),
+            (r#"{"endpoint_file":"/run/x.json"}"#, "endpoint_file"),
+            (r#"{"endpoint_file":"../x.json"}"#, "endpoint_file"),
+            (r#"{"endpoint_file":".."}"#, "endpoint_file"),
         ] {
             let e = Config::parse(text).unwrap_err();
             assert!(e.contains(key), "{text}: {e}");

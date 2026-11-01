@@ -380,11 +380,12 @@ impl Plugin for PumpkinLink {
         if let Some(e) = &config_error {
             tracing::error!("pumpkin-link: {e}; using the defaults and not starting the link");
         }
-        let endpoint = if cfg.endpoint_file.is_empty() {
-            std::path::PathBuf::from(format!("{dir}/{ENDPOINT_FILE}"))
+        let endpoint_name = if cfg.endpoint_file.is_empty() {
+            ENDPOINT_FILE
         } else {
-            std::path::PathBuf::from(&cfg.endpoint_file)
+            cfg.endpoint_file.as_str()
         };
+        let endpoint = std::path::PathBuf::from(format!("{dir}/{endpoint_name}"));
         let auto = cfg.auto_start && config_error.is_none();
         let role = cfg.role;
         let guests = DisplaySink {

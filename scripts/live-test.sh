@@ -71,7 +71,10 @@ record() { # name status detail
 step "build the plugin and the peers"
 (cd "$REPO" && cargo build --release --target wasm32-wasip2) > "$WORK/logs/build-plugin.log" 2>&1 \
   || { tail -20 "$WORK/logs/build-plugin.log"; echo "plugin build failed"; exit 1; }
-PLUGIN_WASM="$WORK/target/wasm32-wasip2/release/pumpkin_link.wasm"
+# Copied at once: the sandbox example below is built from the same library without the plugin glue and
+# writes the same file name.
+cp "$WORK/target/wasm32-wasip2/release/pumpkin_link.wasm" "$WORK/pumpkin_link.plugin.wasm"
+PLUGIN_WASM="$WORK/pumpkin_link.plugin.wasm"
 ls -l "$PLUGIN_WASM"
 
 mkdir -p "$WORK/rb"
@@ -245,6 +248,7 @@ run_guest_case() { # label extra-config
       [ $code -eq 0 ] && record "guest/plain: linkpeer host sees players and poses" PASS "$(tail -1 "$WORK/logs/peer-host-plain.log" | cut -c1-70)" \
         || record "guest/plain: linkpeer host sees players and poses" FAIL "$(tail -1 "$WORK/logs/peer-host-plain.log" | cut -c1-70)"
       stop_server
+      new_case; write_config "$GUESTCFG"   # a fresh data folder: the old one holds the stop marker
       "$RBBIN/fake_host" --port "$PORT" --seconds 12 > "$WORK/logs/fake-host.log" 2>&1 &
       PEER=$!
       sleep 1; start_server "$WORK/logs/server-guest-fakehost.log"
@@ -259,12 +263,12 @@ run_guest_case() { # label extra-config
       ;;
     token)
       # the peer host writes the endpoint file; the server (token_auth guest) reads it
-      EP="$WORK/peer-endpoint.json"
+      EP="$(mktemp -d "$WORK/ep.XXXXXX")/endpoint.json"   # a fresh path: an old file must not be mistaken for the new one
       "$BIN/linkpeer" host --port "$PORT" --endpoint "$EP" --seconds 40 > "$WORK/logs/peer-host-token.log" 2>&1 &
       PEER=$!
       for _ in $(seq 1 50); do [ -s "$EP" ] && break; sleep 0.1; done
       chmod 600 "$EP"
-      write_config "$GUESTCFG, \"token_auth\": true, \"endpoint_file\": \"$DATA/peer-endpoint.json\""
+      write_config "$GUESTCFG, \"token_auth\": true, \"endpoint_file\": \"peer-endpoint.json\""
       cp -p "$EP" "$DATA/peer-endpoint.json"
       start_server "$WORK/logs/server-guest-token.log"
       wait "$PEER"; code=$?
@@ -274,7 +278,7 @@ run_guest_case() { # label extra-config
       ;;
     refused)
       # a host that requires a token, a server that has none: the server is refused and no session starts
-      EP="$WORK/peer-endpoint2.json"
+      EP="$(mktemp -d "$WORK/ep.XXXXXX")/endpoint.json"
       "$RBBIN/interop_peer" host --port "$PORT" --label live --endpoint "$EP" --expect-unauthorized > "$WORK/logs/interop-host.log" 2>&1 &
       PEER=$!
       sleep 1; start_server "$WORK/logs/server-guest-refused.log"
@@ -285,6 +289,12 @@ run_guest_case() { # label extra-config
       ;;
   esac
 }
+
+if [ "$SERVER" = sandbox ]; then
+  step "the plugin component itself loads (Pumpkin's imports stubbed as traps) and declares its permissions"
+  check "plugin: component loads, metadata and permissions" bash -c \
+    "'$SANDBOX_HOST' --inspect '$PLUGIN_WASM' | tee /dev/stderr | grep -q 'permissions.*network.tcp.*network.udp.*network.loopback.*fs.write.data' && echo 'tcp, udp, loopback, fs.write.data'"
+fi
 
 step "rewrite-bridge conformance example (a checker for asset providers: it says nothing about the link)"
 "$RBBIN/conformance" > "$WORK/logs/conformance.log" 2>&1; ccode=$?

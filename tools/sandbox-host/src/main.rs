@@ -10,6 +10,11 @@
 //! plugin component itself; see the README, "How it is tested".
 //!
 //! usage: sandbox-host --data DIR COMPONENT.wasm [args for the component...]
+//!        sandbox-host --inspect PLUGIN.wasm
+//!
+//! `--inspect` loads a Pumpkin plugin component with every import that is not WASI replaced by a trap
+//! and calls its `get-metadata` export, printing the name, version and permissions it declares. It
+//! shows that the component links and what it asks of the server; it does not run the plugin.
 
 use std::net::IpAddr;
 use wasmtime::component::{Component, Linker, ResourceTable};
@@ -32,7 +37,51 @@ impl WasiView for State {
     }
 }
 
+fn inspect(path: &str) -> wasmtime::Result<()> {
+    use wasmtime::component::Val;
+    let mut config = Config::new();
+    config.wasm_component_model(true);
+    let engine = Engine::new(&config)?;
+    let component = Component::from_file(&engine, path)?;
+    let mut linker = Linker::<State>::new(&engine);
+    wasmtime_wasi::p2::add_to_linker_sync(&mut linker)?;
+    linker.define_unknown_imports_as_traps(&component)?;
+    let mut store = Store::new(
+        &engine,
+        State {
+            ctx: WasiCtxBuilder::new().build(),
+            table: ResourceTable::new(),
+        },
+    );
+    let instance = linker.instantiate(&mut store, &component)?;
+    // the plugin registers itself in `init-plugin`, which the server calls first
+    let init = instance
+        .get_func(&mut store, "init-plugin")
+        .ok_or_else(|| wasmtime::format_err!("no init-plugin export"))?;
+    init.call(&mut store, &[], &mut [])?;
+    let (_, iface) = instance
+        .get_export(&mut store, None, "pumpkin:plugin/metadata@0.1.0")
+        .ok_or_else(|| wasmtime::format_err!("no pumpkin:plugin/metadata@0.1.0 export"))?;
+    let (_, func_idx) = instance
+        .get_export(&mut store, Some(&iface), "get-metadata")
+        .ok_or_else(|| wasmtime::format_err!("no get-metadata"))?;
+    let func = instance
+        .get_func(&mut store, func_idx)
+        .ok_or_else(|| wasmtime::format_err!("get-metadata is not a function"))?;
+    let mut out = [Val::Bool(false)];
+    func.call(&mut store, &[], &mut out)?;
+    println!("{out:?}");
+    Ok(())
+}
+
 fn main() -> wasmtime::Result<()> {
+    if std::env::args().nth(1).as_deref() == Some("--inspect") {
+        let Some(path) = std::env::args().nth(2) else {
+            eprintln!("usage: sandbox-host --inspect PLUGIN.wasm");
+            std::process::exit(2);
+        };
+        return inspect(&path);
+    }
     let mut args = std::env::args().skip(1);
     let mut data = None;
     let mut component_path = None;

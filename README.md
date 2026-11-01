@@ -87,7 +87,7 @@ of range stops the link from starting and is named in `/link status`.
 | `heartbeat_ms` | `250` | 10 to 10000 |
 | `timeout_ms` | `2000` | the watchdog is `max(timeout_ms, 4 x the peer's heartbeat)` |
 | `token_auth` | `false` | the link token (below) |
-| `endpoint_file` | `""` | with `token_auth`: the endpoint file; empty = `endpoint.json` in the data folder |
+| `endpoint_file` | `""` | with `token_auth`: the name of the endpoint file **in the plugin's data folder** (a plugin sees no other folder, so a path is refused); empty = `endpoint.json` |
 
 Not carried over from minecraft-link, because they belong to a client: `show_frames`,
 `interp_delay_ms` (guest entities are placed at their latest pose, not interpolated).
@@ -117,6 +117,11 @@ triangles is cut to the nearest ones and announces the smaller radius (`/link st
 host starts, binds the port, **then** writes the endpoint file `{"control_port":N,"token":"..."}` atomically,
 and removes it on stop. A guest with `token_auth` reads the file before every attempt. The token is never
 logged, shown or put in a `bye`.
+
+**Where.** CONTRACT 6.2 leaves the place to the application. A plugin's sandbox shows it only its own data
+folder, so the file is `plugins/data/pumpkin-link/endpoint.json` (the recommended `rewrite-link` folder under
+`$XDG_RUNTIME_DIR` is out of reach); point the other program at that path. A guest-role server reads a file
+that its host wrote into the same data folder (copy it there, or have the host write it there).
 
 **Limit: file mode.** The sandbox has no file mode bits, so the plugin cannot create the file `0600` from the
 start as section 6.2 asks; it gets the mode the server process's umask gives it, and the plugin cannot read it

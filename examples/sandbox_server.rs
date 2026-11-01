@@ -94,11 +94,12 @@ fn main() {
             Config::default()
         }
     };
-    let endpoint = if cfg.endpoint_file.is_empty() {
-        PathBuf::from(format!("{dir}/endpoint.json"))
+    let name = if cfg.endpoint_file.is_empty() {
+        "endpoint.json"
     } else {
-        PathBuf::from(&cfg.endpoint_file)
+        cfg.endpoint_file.as_str()
     };
+    let endpoint = PathBuf::from(format!("{dir}/{name}"));
     let role = cfg.role;
     let auto = cfg.auto_start;
     let mut bridge = Bridge::new(cfg, endpoint);
