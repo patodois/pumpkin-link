@@ -1,0 +1,84 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    name: build, test, lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+          targets: wasm32-wasip2
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            .
+            tools/sandbox-host
+      - name: rustfmt
+        run: |
+          cargo fmt --all -- --check
+          cargo fmt --manifest-path tools/sandbox-host/Cargo.toml -- --check
+      - name: clippy (native: the protocol, mapping, collision, config; tests and examples)
+        run: cargo clippy --all-targets --no-default-features -- -D warnings
+      - name: clippy (wasm32-wasip2: the plugin glue)
+        run: cargo clippy --target wasm32-wasip2 --lib -- -D warnings
+      - name: clippy (sandbox host)
+        run: cargo clippy --manifest-path tools/sandbox-host/Cargo.toml -- -D warnings
+      - name: unit and end-to-end tests
+        run: cargo test --no-default-features
+      - name: build the plugin
+        run: cargo build --release --target wasm32-wasip2
+      - name: the plugin is a component with the v0.1 plugin ABI
+        run: |
+          python3 - <<'PY'
+          data = open("target/wasm32-wasip2/release/pumpkin_link.wasm", "rb").read()
+          assert data[:8] == b"\x00asm\x0d\x00\x01\x00", "not a component"
+          assert b"pumpkin:plugin/metadata@0.1.0" in data, "no metadata export"
+          print("component,", len(data), "bytes")
+          PY
+      - name: public-tree gate
+        run: |
+          python3 tools/check_public_tree.py
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            python3 tools/check_public_tree.py --range "origin/${{ github.base_ref }}..HEAD"
+          elif git rev-parse --verify --quiet origin/main >/dev/null && [ "$(git rev-parse HEAD)" != "$(git rev-parse origin/main)" ]; then
+            python3 tools/check_public_tree.py --range origin/main..HEAD
+          fi
+
+  msrv:
+    name: minimum supported Rust (1.97)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.97.0
+        with:
+          targets: wasm32-wasip2
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release --target wasm32-wasip2
+      - run: cargo test --no-default-features
+
+  sandbox:
+    name: end to end in the WASI sandbox
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip2
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            .
+            tools/sandbox-host
+      - name: scripts/live-test.sh --server sandbox
+        run: scripts/live-test.sh --server sandbox

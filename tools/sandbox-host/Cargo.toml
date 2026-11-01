@@ -1,0 +1,15 @@
+[package]
+name = "sandbox-host"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+publish = false
+description = "Runs a wasm32-wasip2 command component with the socket and file rules Pumpkin gives a plugin (loopback only, one preopened data folder). A test tool, not part of the plugin."
+
+# Not a member of the plugin's package: this is a separate build.
+[workspace]
+
+[dependencies]
+# The version Pumpkin's plugin host uses at the pinned commit.
+wasmtime = { version = "50", default-features = false, features = ["runtime", "component-model", "cranelift", "std"] }
+wasmtime-wasi = { version = "50", default-features = false, features = ["p2"] }
