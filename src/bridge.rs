@@ -489,8 +489,18 @@ impl Bridge {
             ));
             return out;
         };
-        let port = link.control_addr().map_or(0, |a| a.port());
-        let mut head = format!("link: {} on 127.0.0.1:{port}", role_name(self.role));
+        // A guest has no control listener (`control_addr` is port 0): it connects to the host's port, from
+        // the endpoint file when the token is on, else from the config.
+        let mut head = match self.role {
+            Role::Host => {
+                let port = link.control_addr().map_or(0, |a| a.port());
+                format!("link: host on 127.0.0.1:{port}")
+            }
+            Role::Guest if self.token_active => {
+                "link: guest, connecting to 127.0.0.1 (port from the endpoint file)".to_string()
+            }
+            Role::Guest => format!("link: guest, connecting to 127.0.0.1:{}", self.cfg.port),
+        };
         if self.token_active {
             head.push_str(", token auth on");
             if self.counters.refused_unauthorized > 0 {

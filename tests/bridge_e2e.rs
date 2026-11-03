@@ -404,7 +404,13 @@ fn guest_role_publishes_players_to_a_real_host_with_and_without_token() {
             std::thread::sleep(Duration::from_millis(5));
         }
         let status = b.status().join("\n");
-        assert!(status.contains("guest on"), "{status}");
+        // a guest has no control port of its own: the head names the host's port (or the endpoint file)
+        let head = if with_token {
+            "link: guest, connecting to 127.0.0.1 (port from the endpoint file)".to_string()
+        } else {
+            format!("link: guest, connecting to 127.0.0.1:{port}")
+        };
+        assert!(status.contains(&head), "{status}");
         assert!(status.contains("collision received"), "{status}");
         b.stop(&mut sink);
         drop(host);
