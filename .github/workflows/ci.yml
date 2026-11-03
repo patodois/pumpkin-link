@@ -28,9 +28,9 @@ jobs:
         run: |
           cargo fmt --all -- --check
           cargo fmt --manifest-path tools/sandbox-host/Cargo.toml -- --check
-      - name: clippy (native: the protocol, mapping, collision, config; tests and examples)
+      - name: "clippy (native: the protocol, mapping, collision, config; tests and examples)"
         run: cargo clippy --all-targets --no-default-features -- -D warnings
-      - name: clippy (wasm32-wasip2: the plugin glue)
+      - name: "clippy (wasm32-wasip2: the plugin glue)"
         run: cargo clippy --target wasm32-wasip2 --lib -- -D warnings
       - name: clippy (sandbox host)
         run: cargo clippy --manifest-path tools/sandbox-host/Cargo.toml -- -D warnings

@@ -219,8 +219,10 @@ fn guest_entities_reach_the_sink_and_go_away_with_the_session() {
     b.start(Role::Host).unwrap();
     let mut peer = Link::guest(guest_cfg(b.control_port().unwrap())).unwrap();
     let (mut sink, mut ev) = (Sink::default(), Vec::new());
-    assert!(pump(&mut b, &mut peer, &[], &mut sink, &mut ev, |b, _| b
-        .is_connected()));
+    // Both ends of the handshake: the guest can only send once it has seen the host's welcome.
+    assert!(pump(&mut b, &mut peer, &[], &mut sink, &mut ev, |b, e| {
+        b.is_connected() && e.iter().any(|x| matches!(x, Event::Connected(_)))
+    }));
     peer.spawn(&Spawn {
         entity: 7,
         provider: "Other".into(),
