@@ -2,13 +2,14 @@
 //! Prints one result line, `PEER OK ...` or `PEER FAIL: ...`, and exits 0 or 1.
 //!
 //! cargo run --release --example linkpeer -- guest --port 47800 --expect ok [--endpoint FILE]
-//!     [--token T] [--players 2] [--seconds 20]
+//!     [--token T] [--players 2] [--collision 1] [--seconds 20]
 //! cargo run --release --example linkpeer -- guest --port 47800 --expect unauthorized [--token T]
 //! cargo run --release --example linkpeer -- host --port 47800 [--players 2] [--endpoint FILE]
 //!
 //! `guest --expect ok`: connects to the plugin as host, and must see a spawn and poses for every
 //! player (provider and asset as configured) and a collision snapshot; it also spawns an entity of its
-//! own and poses it so the server's side can show it. `guest --expect unauthorized`: the handshake must
+//! own and poses it so the server's side can show it. `--players 0 --collision 0` is for a server with
+//! nobody online (a real Pumpkin server in a test): nothing is required of the players or the collision. `guest --expect unauthorized`: the handshake must
 //! end in `unauthorized` and no session may start. `host`: listens for the plugin as guest and must
 //! see the same spawns and poses.
 
@@ -34,6 +35,7 @@ fn main() {
     let port: u16 = arg("--port").unwrap_or(47800);
     let players: usize = arg("--players").unwrap_or(2);
     let seconds: u64 = arg("--seconds").unwrap_or(20);
+    let min_collision: usize = arg("--collision").unwrap_or(1);
     let expect: String = arg("--expect").unwrap_or_else(|| "ok".into());
     let endpoint: Option<PathBuf> = arg::<String>("--endpoint").map(PathBuf::from);
     let token: Option<String> = arg("--token");
@@ -127,9 +129,10 @@ fn main() {
             let _ = link.send_poses(&[p]);
             own_poses += 1;
         }
-        let done = spawned.len() >= players
+        let done = connected
+            && spawned.len() >= players
             && posed.len() >= players
-            && (mode == "host" || collision > 0)
+            && (mode == "host" || collision >= min_collision)
             && (mode == "host" || own_poses >= 60);
         if expect != "unauthorized" && done {
             println!(
