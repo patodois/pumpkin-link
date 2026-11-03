@@ -167,6 +167,7 @@ struct DisplaySink {
 impl GuestSink for DisplaySink {
     fn spawn(&mut self, entity: u32, _spawn: &Spawn) {
         let (Some(world), Some(state)) = (&self.world, self.block_state) else {
+            tracing::warn!("pumpkin-link: guest entity {entity} not shown (no world or no block)");
             return;
         };
         let e = world.spawn_entity(EntityType::BlockDisplay, (0.0, 0.0, 0.0));
@@ -181,6 +182,10 @@ impl GuestSink for DisplaySink {
                 );
             }
         }
+        tracing::info!(
+            "pumpkin-link: guest entity {entity} shown as block display (server entity id {})",
+            e.get_id()
+        );
         self.shown.insert(entity, e);
     }
 
@@ -193,11 +198,18 @@ impl GuestSink for DisplaySink {
 
     fn despawn(&mut self, entity: u32) {
         if let Some(e) = self.shown.remove(&entity) {
+            tracing::info!(
+                "pumpkin-link: guest entity {entity} removed (server entity id {})",
+                e.get_id()
+            );
             e.remove();
         }
     }
 
     fn clear(&mut self) {
+        if !self.shown.is_empty() {
+            tracing::info!("pumpkin-link: {} guest entities cleared", self.shown.len());
+        }
         for (_, e) in self.shown.drain() {
             e.remove();
         }
