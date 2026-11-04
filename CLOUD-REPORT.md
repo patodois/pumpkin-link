@@ -1,7 +1,23 @@
 # CLOUD-REPORT: pumpkin-link
 
-Branch `claude/pumpkin-link-plugin-rv18cr`. Everything below was run in the cloud session unless it says
-otherwise; commands are given so they can be run again.
+Branch `claude/pumpkin-link-plugin-rv18cr`, then `fix/review`. Everything below was run in the cloud session unless
+it says otherwise; commands are given so they can be run again.
+
+## Update, 2026-11-04: run against a real Pumpkin on a Mac
+
+* Pumpkin was built at the pinned commit with a server jar already on that machine, and
+  `scripts/live-test.sh --server pumpkin` ran for the first time: Pumpkin loads the plugin with its four
+  permissions; host, guest, the three token cases, a guest entity shown as a block display and removed, `/link status`
+  and `/link stop` all pass, with every socket on 127.0.0.1. No check fails; 3 are NEEDS-CLIENT.
+* With no player online, collision and player publishing did not run on a real server. Those paths have only run in
+  the sandbox. `WorldSource`, in particular, has not read a real block.
+* The sections below that say the plugin was never run in Pumpkin and that Pumpkin could not be built describe the
+  cloud session. They stay as the record of that session; this update replaces their conclusions.
+* Fixed since: the raw pointer in `WorldSource` is now an `Rc<RefCell<..>>`; `/link status` of a guest names the
+  host's port; the guest's entities are logged; the live test writes its own server config (127.0.0.1, offline, no
+  Bedrock, no telemetry).
+* Still open: the client test below; moving this plugin onto `rewrite_bridge::link::Link` once that crate runs on this
+  target.
 
 ## Summary
 
@@ -197,8 +213,6 @@ Notes on that table:
 * Rescan cost: a radius-16 scan is 33 x 33 x 33 = 35,937 block reads across the plugin boundary, one layer
   (1,089 reads) per tick, so about 1.7 s per rescan; a radius of 64 is 129 layers, about 6.5 s. Not measured
   on a server; the layers-per-tick constant is `SCAN_LAYERS_PER_TICK` in `src/bridge.rs`.
-* `WorldSource` keeps a raw pointer to the cell cache owned by the per-tick `WorldBlocks` (a deliberate shortcut,
-  commented); a safer structure would use `Rc<RefCell<..>>`.
 * A server with more than 1024 players publishes only the first 1024 (counted in `players_over_limit`).
 * The config file is read when the plugin loads; there is no reload command, so edits need the plugin (or the
   server) restarted.
