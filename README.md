@@ -159,6 +159,9 @@ threads, no memory-mapped files and no way to set a file's mode, so there:
 
 * a guest connects inside `poll`, for at most 100 ms: an accept or a refusal on loopback takes well under a
   millisecond, but a host that never accepts would leave the connect hanging, and the server's tick with it;
+* a peer that holds its connection open and stops reading is not waited for: the runtime would hold the
+  server's tick until the peer reads or exits (for ever on Linux), so the connection is set aside and closed
+  when the peer lets go; with four of them set aside the plugin takes no new connection until one is;
 * the pixel file is not available, and neither is the 4 MiB UDP receive buffer of CONTRACT section 2;
 * the endpoint file gets the mode of the server's umask (see "Token" above).
 

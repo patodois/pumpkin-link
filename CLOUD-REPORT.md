@@ -27,6 +27,11 @@ it says otherwise; commands are given so they can be run again.
   protocol and pixel-file tests again on `wasm32-wasip2` under wasmtime 50.0.1, clippy and rustfmt as in CI, and
   `scripts/live-test.sh --server sandbox`: ALL PASSED (21 rows: 20 checks and the conformance info line), the plugin built
   against the new crate and the peers against rewrite-bridge 0.3.0 from crates.io. `--server pumpkin` was not run.
+* A peer that stops reading used to be able to hold the server's tick: under wasmtime, closing a socket waits for the
+  bytes the runtime still has for it, which for a peer that neither reads nor exits took 5 s on macOS and never ended
+  on Linux. `Link` now sets such a connection aside instead of closing it (see the README, "The link"). The plugin's
+  own control traffic is a few hundred bytes per player, so it cannot fill a socket by itself; the path is reached
+  only by a peer that stops reading while a lot is queued for it.
 * This needs a `rewrite-bridge` that runs on `wasm32-wasip2`, which 0.3.0 does not. The sections below that describe
   `src/session.rs` and `src/endpoint.rs`, and the crate failing on this target, are the record of the first
   version; the rows of the path proof still say what the sandbox allows.
