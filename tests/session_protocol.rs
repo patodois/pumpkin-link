@@ -889,3 +889,48 @@ fn dropping_the_link_waits_at_most_the_linger_time_for_a_silent_peer() {
         "{stuck:?}"
     );
 }
+
+/// A datagram with a hand-written header (so the kind can be one no decoder knows) and `len` bytes in all.
+fn raw_datagram(session: u32, kind: u8, len: usize) -> Vec<u8> {
+    let mut d = Vec::with_capacity(len);
+    d.extend_from_slice(&0x4B4C_4252u32.to_le_bytes());
+    d.extend_from_slice(&1u16.to_le_bytes());
+    d.push(kind);
+    d.push(0);
+    d.extend_from_slice(&session.to_le_bytes());
+    d.extend_from_slice(&1u32.to_le_bytes());
+    d.extend_from_slice(&now_us().to_le_bytes());
+    d.resize(len, 0);
+    d
+}
+
+#[test]
+fn datagrams_over_8192_bytes_are_malformed_if_the_kind_is_known_and_proof_of_life_if_not() {
+    // section 2: a known kind of more than 8192 bytes is malformed; an unknown kind is ignored at any length
+    // the receive buffer holds, and (section 9.1) still shows that the peer is alive.
+    let mut c = cfg();
+    c.timeout = Duration::from_millis(300);
+    let mut r = Rig::connect(Link::host(c).unwrap());
+    r.send(&hello_line("").replace("\"heartbeat_ms\":250", "\"heartbeat_ms\":20"));
+    assert!(r.until(|r| r.events.iter().any(|e| matches!(e, Event::Connected(_)))));
+    let Control::Hello(h) = Control::parse(&r.lines()[0]).unwrap() else {
+        panic!()
+    };
+    r.udp.connect(("127.0.0.1", h.udp_port)).unwrap();
+    r.session = h.session.unwrap();
+
+    r.udp.send(&raw_datagram(r.session, 4, 9000)).unwrap(); // a Collision of 9000 bytes
+    r.run(100);
+    let s = r.host.stats();
+    assert_eq!((s.malformed, s.datagrams_received), (1, 0), "{s:?}");
+
+    // only unknown-kind datagrams, for much longer than the 300 ms watchdog: the session stays up
+    for _ in 0..16 {
+        r.udp.send(&raw_datagram(r.session, 99, 9000)).unwrap();
+        r.run(50);
+    }
+    let s = r.host.stats();
+    assert_eq!((s.malformed, s.datagrams_received), (1, 16), "{s:?}");
+    assert!(r.host.is_connected());
+    assert!(r.until(|r| r.events.iter().any(|e| matches!(e, Event::Lost { .. }))));
+}
