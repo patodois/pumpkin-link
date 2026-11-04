@@ -123,10 +123,12 @@ folder, so the file is `plugins/data/pumpkin-link/endpoint.json` (the recommende
 `$XDG_RUNTIME_DIR` is out of reach); point the other program at that path. A guest-role server reads a file
 that its host wrote into the same data folder (copy it there, or have the host write it there).
 
-**Limit: file mode.** The sandbox has no file mode bits, so the plugin cannot create the file `0600` from the
-start as section 6.2 asks; it gets the mode the server process's umask gives it, and the plugin cannot read it
-back to check. Start the server with `umask 077` (and keep the data folder to yourself) when you use the
-token. A guest built on `rewrite-bridge` refuses an endpoint file that group or others can read.
+**Limit: file mode.** A plugin cannot ask for a file mode when it creates a file, so it cannot create the file
+`0600` from the start as section 6.2 asks. The file gets what the server process's umask leaves: 0644 under the
+usual umask 022, 0600 under 077 (measured under wasmtime). Under 022 other users can read the token, and a guest built on
+`rewrite-bridge` refuses the file because group and others can read it, so such a server cannot serve a native
+guest. The plugin cannot read the mode back either. Start the server with `umask 077`, or keep the data folder
+to yourself (mode 0700), when you use the token. On Windows there is no umask; the folder's ACL is what counts.
 
 ## Permissions it asks for, and why
 
@@ -153,9 +155,10 @@ It asks for no outbound network, HTTP, DNS, environment or system information.
 ## The link
 
 Both roles are `rewrite_bridge::link::Link`, polled once per server tick. On `wasm32-wasip2` there are no
-threads, no memory-mapped files and no file mode bits, so there:
+threads, no memory-mapped files and no way to set a file's mode, so there:
 
-* a guest connects inside `poll`, blocking for as long as loopback takes to answer (a refusal is immediate);
+* a guest connects inside `poll`, for at most 100 ms: an accept or a refusal on loopback takes well under a
+  millisecond, but a host that never accepts would leave the connect hanging, and the server's tick with it;
 * the pixel file is not available, and neither is the 4 MiB UDP receive buffer of CONTRACT section 2;
 * the endpoint file gets the mode of the server's umask (see "Token" above).
 

@@ -1,5 +1,5 @@
 //! The glue to Pumpkin's plugin API (`pumpkin-plugin-api` 0.2, WebAssembly only). Everything of
-//! substance is in `bridge`, `collision`, `mapping`, `config` and `endpoint`, which are tested natively;
+//! substance is in `bridge`, `collision`, `mapping` and `config`, which are tested natively;
 //! this file only reads the server's state into their types once per tick and shows the guest's
 //! entities. It cannot be run without a Pumpkin server, so it is kept small.
 

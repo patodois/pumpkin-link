@@ -23,9 +23,9 @@ it says otherwise; commands are given so they can be run again.
 * The plugin no longer has its own session. `src/session.rs` (1126 lines) and `src/endpoint.rs` (201 lines) are
   gone; `src/bridge.rs` drives `rewrite_bridge::link::Link` for both roles, and the token and endpoint file are
   `LinkConfig::endpoint_file`. `getrandom` is no longer a dependency of the plugin.
-* Run after the port: `cargo test --no-default-features` (36 unit, 8 bridge, 1 pixel-file, 28 protocol tests), the
+* Run after the port: `cargo test --no-default-features` (36 unit, 8 bridge, 1 tick-rate, 2 pixel-file and 28 protocol tests), the
   protocol and pixel-file tests again on `wasm32-wasip2` under wasmtime 50.0.1, clippy and rustfmt as in CI, and
-  `scripts/live-test.sh --server sandbox`: ALL PASSED (21 checks and the conformance info line), the plugin built
+  `scripts/live-test.sh --server sandbox`: ALL PASSED (21 rows: 20 checks and the conformance info line), the plugin built
   against the new crate and the peers against rewrite-bridge 0.3.0 from crates.io. `--server pumpkin` was not run.
 * This needs a `rewrite-bridge` that runs on `wasm32-wasip2`, which 0.3.0 does not. The sections below that describe
   `src/session.rs` and `src/endpoint.rs`, and the crate failing on this target, are the record of the first
@@ -234,5 +234,5 @@ Notes on that table:
 No game files or game data were downloaded or committed. The one request for game data came from Pumpkin's own
 build script (see above) and failed. Pumpkin's source was read (not copied) to find the socket policy, the
 plugin-version identification, and how the host fills block shapes; nothing of it is in the repository. The
-`rewrite-bridge` crate is used as a dependency (`=0.3.0`), not vendored. No pull request, tag, release or
+`rewrite-bridge` crate is used as a dependency (`=0.3.1`), not vendored. No pull request, tag, release or
 publication was made.
