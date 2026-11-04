@@ -3,7 +3,9 @@
 #![allow(dead_code)]
 
 use pumpkin_link::bridge::{Bridge, GuestSink, NoGuests, PlayerSample, Tick, Worlds};
-use rewrite_bridge::link::{Control, Datagram, Header, decode_datagram, encode_datagram, now_us};
+use rewrite_bridge::link::{
+    Control, Datagram, Header, Hello, decode_datagram, encode_datagram, now_us,
+};
 use std::io::{Read, Write};
 use std::net::{Ipv4Addr, SocketAddr, TcpStream, UdpSocket};
 use std::time::{Duration, Instant};
@@ -34,6 +36,8 @@ pub fn tick_with(
 }
 
 pub struct RawGuest {
+    /// What the host said in its `hello`.
+    pub host: Hello,
     pub tcp: TcpStream,
     pub udp: UdpSocket,
     pub session: u32,
@@ -72,9 +76,10 @@ impl RawGuest {
         };
         udp.connect(localhost(host.udp_port)).unwrap();
         Self {
+            session: host.session.unwrap(),
+            host,
             tcp,
             udp,
-            session: host.session.unwrap(),
             seq: 0,
         }
     }

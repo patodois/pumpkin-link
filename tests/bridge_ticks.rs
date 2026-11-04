@@ -84,3 +84,31 @@ fn the_bridge_polls_the_link_once_per_tick_so_a_snapshot_goes_out_32_chunks_a_ti
     );
     b.stop(sink.as_mut());
 }
+
+/// The settings of the config that the peer can see reach the link: the UDP port, the heartbeat and the
+/// timeout are in the host's `hello`.
+#[test]
+fn the_bridge_hands_the_udp_port_the_heartbeat_and_the_timeout_to_the_link() {
+    let udp_port = std::net::UdpSocket::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let mut b = Bridge::new(
+        Config {
+            port: 0,
+            udp_port,
+            heartbeat_ms: 123,
+            timeout_ms: 4567,
+            ..Config::default()
+        },
+        PathBuf::from("endpoint.json"),
+    );
+    b.start(Role::Host).unwrap();
+    let peer = RawGuest::connect(&mut b);
+    assert_eq!(peer.host.udp_port, udp_port);
+    assert_eq!(peer.host.heartbeat_ms, 123);
+    assert_eq!(peer.host.timeout_ms, 4567);
+    assert_eq!(peer.host.game, pumpkin_link::bridge::GAME);
+    b.stop(&mut NoGuests);
+}
