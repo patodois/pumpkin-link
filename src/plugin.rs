@@ -20,6 +20,7 @@ use pumpkin_plugin_api::{
     register_plugin, world,
 };
 use rewrite_bridge::link::Spawn;
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Mutex;
@@ -29,11 +30,14 @@ const COMMAND_PERMISSION: &str = "pumpkin-link:command.link";
 const CONFIG_FILE: &str = "pumpkin-link.json";
 const ENDPOINT_FILE: &str = "endpoint.json";
 
+/// Shared by the block sources of every world in a tick.
+type CellCache = Rc<RefCell<HashMap<u16, Rc<Cell>>>>;
+
 struct State {
     bridge: Bridge,
     config_error: Option<String>,
     /// Block state id to its cell, for states that are air, have no shape, or are a full cube.
-    cells: HashMap<u16, Rc<Cell>>,
+    cells: CellCache,
     guests: DisplaySink,
     task: Option<u32>,
 }
@@ -81,14 +85,14 @@ fn samples(server: &Server) -> Vec<PlayerSample> {
 /// The blocks of the server's worlds, read through the plugin API.
 struct WorldBlocks<'a> {
     server: &'a Server,
-    cells: &'a mut HashMap<u16, Rc<Cell>>,
+    cells: CellCache,
     worlds: HashMap<String, WorldSource>,
 }
 
 struct WorldSource {
     world: World,
     loaded: HashMap<(i32, i32), bool>,
-    cells: *mut HashMap<u16, Rc<Cell>>,
+    cells: CellCache,
 }
 
 impl BlockSource for WorldSource {
@@ -104,10 +108,7 @@ impl BlockSource for WorldSource {
         }
         let pos = BlockPos { x, y, z };
         let id = world.get_block_state_id(pos);
-        // SAFETY: the pointer is the `cells` map of the `WorldBlocks` that owns this source, which
-        // outlives it and is not touched while a source runs.
-        let cells = unsafe { &mut *self.cells };
-        if let Some(c) = cells.get(&id) {
+        if let Some(c) = self.cells.borrow().get(&id) {
             return Some(c.clone());
         }
         let state = world.get_block_state(pos);
@@ -123,7 +124,7 @@ impl BlockSource for WorldSource {
         // The shapes of a state can be shifted per position for a few blocks (the server's
         // `shape_offset_delta`), so only states with no shape or a plain cube are remembered.
         if cell.boxes.is_empty() || cell.full {
-            cells.insert(id, cell.clone());
+            self.cells.borrow_mut().insert(id, cell.clone());
         }
         Some(cell)
     }
@@ -137,13 +138,12 @@ impl Worlds for WorldBlocks<'_> {
                 .get_all_worlds()
                 .into_iter()
                 .find(|w| w.get_id() == world)?;
-            let cells: *mut HashMap<u16, Rc<Cell>> = &mut *self.cells;
             self.worlds.insert(
                 world.to_owned(),
                 WorldSource {
                     world: w,
                     loaded: HashMap::new(),
-                    cells,
+                    cells: self.cells.clone(),
                 },
             );
         }
@@ -246,7 +246,7 @@ fn on_tick(server: Server) {
     } = st;
     let mut worlds = WorldBlocks {
         server: &server,
-        cells,
+        cells: cells.clone(),
         worlds: HashMap::new(),
     };
     bridge.tick(Tick {
@@ -420,7 +420,7 @@ impl Plugin for PumpkinLink {
         *STATE.lock().unwrap_or_else(|e| e.into_inner()) = Some(State {
             bridge,
             config_error,
-            cells: HashMap::new(),
+            cells: CellCache::default(),
             guests,
             task: Some(task),
         });
