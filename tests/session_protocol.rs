@@ -1,6 +1,9 @@
 //! The rules of CONTRACT sections 6 to 9 that the plugin relies on `rewrite_bridge::link::Link` for,
 //! checked with hand-written peers on raw sockets (so a wrong answer cannot hide behind a library that
 //! makes the same mistake). The link is driven the way the plugin drives it: `poll` and nothing else.
+//!
+//! The file also runs on `wasm32-wasip2` under wasmtime (a runner with `-S inherit-network`):
+//! `cargo test --target wasm32-wasip2 --no-default-features --test session_protocol`.
 
 use rewrite_bridge::link::{
     CollisionChunk, Control, Datagram, Event, Header, Link, LinkConfig, MAX_ENTITIES,
@@ -576,8 +579,9 @@ fn the_host_sends_heartbeats_and_the_watchdog_ends_a_silent_session() {
             .iter()
             .any(|e| matches!(e, Event::Lost { reason } if reason.contains("watchdog")))
     }));
+    // (the `bye` was written in the same poll as the event; reading it is a separate step of the peer)
     assert!(
-        r.bye_reason().is_some(),
+        r.until(|r| r.bye_reason().is_some()),
         "the watchdog closes with a bye (section 6.1)"
     );
 }
@@ -585,7 +589,6 @@ fn the_host_sends_heartbeats_and_the_watchdog_ends_a_silent_session() {
 #[test]
 fn a_dropped_connection_without_a_bye_is_lost_at_once() {
     let mut r = Rig::handshake(Link::host(cfg()).unwrap());
-    drop(r.tcp.try_clone().unwrap());
     r.tcp.shutdown(std::net::Shutdown::Both).unwrap();
     assert!(r.until(|r| r.events.iter().any(|e| matches!(e, Event::Lost { .. }))));
 }
@@ -699,4 +702,190 @@ fn a_guest_session_does_the_same_from_the_other_side() {
     let (hd, poses) = got.expect("a pose datagram");
     assert_eq!(hd.session, 777);
     assert_eq!(poses[0].entity, 1);
+}
+
+// ---------------------------------------------------------------------------------------------
+// One poll per server tick. A Pumpkin server runs 20 ticks a second and the plugin polls once per tick, so
+// these drive the link at 50 ms steps, the way the plugin does, and check the rules that depend on how often
+// `poll` is called.
+
+const TICK: Duration = Duration::from_millis(50);
+
+impl Rig {
+    /// One server tick: a single poll, then the 50 ms until the next one; the peer reads what arrived.
+    fn tick(&mut self) -> Vec<Event> {
+        let events = self.host.poll();
+        self.events.extend(events.iter().cloned());
+        std::thread::sleep(TICK);
+        let mut b = [0u8; 4096];
+        while let Ok(n) = self.tcp.read(&mut b) {
+            if n == 0 {
+                break;
+            }
+            self.buf.extend_from_slice(&b[..n]);
+        }
+        events
+    }
+
+    /// Datagrams the peer has received so far, as `(kind, header seq)`.
+    fn received(&self) -> Vec<(u8, u32)> {
+        let mut out = Vec::new();
+        let mut b = [0u8; 8193];
+        while let Ok(n) = self.udp.recv(&mut b) {
+            if let Ok((h, body)) = decode_datagram(&b[..n]) {
+                let kind = match body {
+                    Datagram::Heartbeat => 1,
+                    Datagram::Camera(_) => 2,
+                    Datagram::Pose(_) => 3,
+                    Datagram::Collision(_) => 4,
+                    Datagram::Frame(_) => 5,
+                    Datagram::Unknown { .. } => 0,
+                };
+                out.push((kind, h.seq));
+            }
+        }
+        out
+    }
+}
+
+/// A handshaken rig whose UDP socket does not block, polled at the tick rate.
+fn tick_rig(c: LinkConfig) -> Rig {
+    let r = Rig::handshake(Link::host(c).unwrap());
+    r.udp.set_nonblocking(true).unwrap();
+    r
+}
+
+#[test]
+fn heartbeats_at_one_poll_per_tick_stay_inside_one_tick_of_the_interval() {
+    let mut r = tick_rig(cfg()); // heartbeat 250 ms, the default
+    let mut arrival = Vec::new();
+    let start = Instant::now();
+    for _ in 0..52 {
+        r.tick();
+        for (kind, _) in r.received() {
+            if kind == 1 {
+                arrival.push(start.elapsed());
+            }
+        }
+    }
+    let gaps: Vec<u128> = arrival
+        .windows(2)
+        .map(|w| (w[1] - w[0]).as_millis())
+        .collect();
+    println!("heartbeats {} in 2.6 s, gaps in ms {gaps:?}", arrival.len());
+    // 250 ms is 5 ticks, so a beat is due on every fifth poll; one more tick of slack for a late sleep
+    assert!(arrival.len() >= 8, "{} heartbeats", arrival.len());
+    assert!(gaps.iter().all(|g| *g <= 350), "{gaps:?}");
+}
+
+#[test]
+fn a_peer_that_beats_every_250_ms_is_not_lost_at_one_poll_per_tick() {
+    let mut c = cfg();
+    c.timeout = Duration::from_millis(600);
+    let mut r = tick_rig(c);
+    let mut lost = false;
+    for i in 0..60 {
+        if i % 5 == 0 {
+            r.datagram(&Datagram::Heartbeat);
+        }
+        lost |= r.tick().iter().any(|e| matches!(e, Event::Lost { .. }));
+    }
+    assert!(!lost && r.host.is_connected());
+}
+
+#[test]
+fn a_silent_peer_is_lost_within_one_tick_of_the_watchdog_timeout() {
+    let mut c = cfg();
+    c.timeout = Duration::from_millis(600);
+    let mut r = tick_rig(c);
+    let silent_since = Instant::now();
+    let mut lost_after = None;
+    for _ in 0..40 {
+        if r.tick().iter().any(|e| matches!(e, Event::Lost { .. })) {
+            lost_after = Some(silent_since.elapsed());
+            break;
+        }
+    }
+    let ms = lost_after.expect("never lost").as_millis();
+    println!("silent peer lost after {ms} ms, watchdog 600 ms");
+    // the timeout is max(own, 4 x the peer's 250 ms) = 1000 ms here; the poll after it ends the session
+    assert!((1000..=1250).contains(&ms), "{ms} ms");
+}
+
+#[test]
+fn a_snapshot_goes_out_32_datagrams_per_poll() {
+    let mut r = tick_rig(cfg());
+    r.received();
+    let tri = [[0.0f32; 3]; 3];
+    // 40 chunks of 226 triangles
+    let q = r
+        .host
+        .send_collision([0.0; 3], 8.0, &vec![tri; 226 * 40])
+        .unwrap();
+    let mut per_poll = Vec::new();
+    for _ in 0..4 {
+        r.tick();
+        per_poll.push(r.received().iter().filter(|(k, _)| *k == 4).count());
+    }
+    println!("snapshot {q}: collision datagrams per poll {per_poll:?}");
+    assert_eq!(per_poll, vec![32, 8, 0, 0]);
+}
+
+#[test]
+fn a_burst_of_control_lines_is_taken_in_one_poll() {
+    let mut r = tick_rig(cfg());
+    let mut batch = String::new();
+    for i in 0..MAX_ENTITIES as u32 {
+        batch.push_str(&format!(
+            "{{\"type\":\"spawn\",\"entity\":{i},\"provider\":\"p\",\"asset\":\"a\"}}\n"
+        ));
+    }
+    r.send(&batch);
+    std::thread::sleep(Duration::from_millis(20));
+    let events = r.tick();
+    let spawns = events
+        .iter()
+        .filter(|e| matches!(e, Event::Spawn(_)))
+        .count();
+    println!("{} spawns reached the first poll", spawns);
+    assert_eq!(spawns, MAX_ENTITIES);
+}
+
+/// Dropping a `Link` says `bye`, half-closes and drains for the 200 ms of section 6.1, step 3, so a drop in the
+/// middle of a server tick holds the tick up to that long. A peer that reads the `bye` and closes ends it at
+/// once (this one needs a thread for the peer, which `wasm32-wasip2` has none of).
+#[cfg(not(target_os = "wasi"))]
+#[test]
+fn dropping_the_link_returns_as_soon_as_the_peer_has_closed() {
+    let r = Rig::handshake(Link::host(cfg()).unwrap());
+    let started = Instant::now();
+    let Rig { host, tcp, .. } = r;
+    let closer = std::thread::spawn(move || {
+        let mut tcp = tcp;
+        tcp.set_nonblocking(false).unwrap();
+        let mut b = [0u8; 256];
+        while tcp.read(&mut b).is_ok_and(|n| n > 0) {}
+    });
+    drop(host);
+    let quick = started.elapsed();
+    closer.join().unwrap();
+    println!("drop with a closing peer {quick:?}");
+    assert!(quick < Duration::from_millis(100), "{quick:?}");
+}
+
+/// A peer that neither reads nor closes: the drop waits the 200 ms and no longer.
+#[test]
+fn dropping_the_link_waits_at_most_the_linger_time_for_a_silent_peer() {
+    let r = Rig::handshake(Link::host(cfg()).unwrap());
+    let started = Instant::now();
+    let Rig {
+        host, tcp: _tcp, ..
+    } = r;
+    drop(host);
+    let stuck = started.elapsed();
+    println!("drop with a silent peer {stuck:?}");
+    assert!(
+        (Duration::from_millis(190)..Duration::from_millis(400)).contains(&stuck),
+        "{stuck:?}"
+    );
 }
