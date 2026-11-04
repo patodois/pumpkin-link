@@ -113,8 +113,8 @@ triangles is cut to the nearest ones and announces the smaller radius (`/link st
 
 ## Token (optional, CONTRACT 6.2)
 
-`"token_auth": true` on a host makes a new 32-byte token from the sandbox's random source each time the
-host starts, binds the port, **then** writes the endpoint file `{"control_port":N,"token":"..."}` atomically,
+`"token_auth": true` on a host makes a new 32-byte token from the system's random source (WASI `random` in
+the sandbox) each time the host starts, binds the port, **then** writes the endpoint file `{"control_port":N,"token":"..."}` atomically,
 and removes it on stop. A guest with `token_auth` reads the file before every attempt. The token is never
 logged, shown or put in a `bye`.
 
@@ -141,8 +141,8 @@ It asks for no outbound network, HTTP, DNS, environment or system information.
 
 ## How it is tested
 
-* `cargo test --no-default-features`: unit tests (mapping, config, collision, endpoint file, session rules)
-  and end-to-end tests of the bridge against real `rewrite-bridge` peers over loopback.
+* `cargo test --no-default-features`: unit tests (mapping, config, collision), the rules of the protocol checked with hand-written peers
+  on raw sockets, and end-to-end tests of the bridge against real `rewrite-bridge` peers over loopback.
 * `scripts/live-test.sh --server sandbox`: runs the same code as a WebAssembly component in
   `tools/sandbox-host` (wasmtime-wasi with Pumpkin's socket and folder rules) and drives it with the
   `rewrite-bridge` examples and `examples/linkpeer.rs`, with and without the token and with a wrong one.
@@ -150,12 +150,17 @@ It asks for no outbound network, HTTP, DNS, environment or system information.
   pinned release tag in a temporary folder. It needs `PUMPKIN_MINECRAFT_SERVER_JAR`, a server jar you
   already have, because Pumpkin's build reads the game's data from it; the script never downloads it.
 
-## Why not `rewrite_bridge::link::Link`?
+## The link
 
-It compiles for `wasm32-wasip2` but cannot run there: the host's session number uses
-`std::process::id()`, which panics on that target, and a guest connects from a spawned thread, which
-that target does not have. `src/session.rs` does both roles from the contract on non-blocking sockets
-driven by the server's tick and uses only the crate's wire codec.
+Both roles are `rewrite_bridge::link::Link`, polled once per server tick. On `wasm32-wasip2` there are no
+threads, no memory-mapped files and no file mode bits, so there:
+
+* a guest connects inside `poll`, blocking for as long as loopback takes to answer (a refusal is immediate);
+* the pixel file is not available, and neither is the 4 MiB UDP receive buffer of CONTRACT section 2;
+* the endpoint file gets the mode of the server's umask (see "Token" above).
+
+This needs a `rewrite-bridge` release that runs on that target; earlier ones panic when a host sees a guest's
+`hello` and cannot connect as a guest.
 
 ## License
 

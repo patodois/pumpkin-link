@@ -16,8 +16,20 @@ it says otherwise; commands are given so they can be run again.
 * Fixed since: the raw pointer in `WorldSource` is now an `Rc<RefCell<..>>`; `/link status` of a guest names the
   host's port; the guest's entities are logged; the live test writes its own server config (127.0.0.1, offline, no
   Bedrock, no telemetry).
-* Still open: the client test below; moving this plugin onto `rewrite_bridge::link::Link` once that crate runs on this
-  target.
+* Still open: the client test below.
+
+## Update, port onto `rewrite_bridge::link::Link`
+
+* The plugin no longer has its own session. `src/session.rs` (1126 lines) and `src/endpoint.rs` (201 lines) are
+  gone; `src/bridge.rs` drives `rewrite_bridge::link::Link` for both roles, and the token and endpoint file are
+  `LinkConfig::endpoint_file`. `getrandom` is no longer a dependency of the plugin.
+* Run after the port: `cargo test --no-default-features` (36 unit, 8 bridge, 1 pixel-file, 28 protocol tests), the
+  protocol and pixel-file tests again on `wasm32-wasip2` under wasmtime 50.0.1, clippy and rustfmt as in CI, and
+  `scripts/live-test.sh --server sandbox`: ALL PASSED (21 checks and the conformance info line), the plugin built
+  against the new crate and the peers against rewrite-bridge 0.3.0 from crates.io. `--server pumpkin` was not run.
+* This needs a `rewrite-bridge` that runs on `wasm32-wasip2`, which 0.3.0 does not. The sections below that describe
+  `src/session.rs` and `src/endpoint.rs`, and the crate failing on this target, are the record of the first
+  version; the rows of the path proof still say what the sandbox allows.
 
 ## Summary
 
@@ -32,8 +44,9 @@ it says otherwise; commands are given so they can be run again.
   peers. The glue compiles, passes clippy for `wasm32-wasip2`, and the built plugin component instantiates and
   reports its metadata (below), but its calls into the server (players, blocks, entities, commands) are
   untested.
-* Biggest finding: `rewrite_bridge::link::Link` **compiles for `wasm32-wasip2` but cannot run there** (details
-  below), so `src/session.rs` implements both roles from CONTRACT.md on top of the crate's wire codec.
+* Biggest finding of the first version: `rewrite_bridge::link::Link` **compiled for `wasm32-wasip2` but could not
+  run there** (details below), so `src/session.rs` implemented both roles from CONTRACT.md on top of the crate's
+  wire codec. The crate has been fixed and the plugin now uses it (see the update at the top).
 
 ## The path proof (task step 1)
 
@@ -51,11 +64,11 @@ as unsupported) and were not run. A probe plugin built against the Pumpkin API e
 | Files in the data folder: exclusive create, write, rename, read | work (`fs.write.data`, folder preopened as `data`) |
 | File mode `0600` at creation, `chmod` | **not available** (no mode bits in WASI; *inferred*) |
 | `SO_RCVBUF` (contract 2: ask for 4 MiB) | **not available** through `std` (*inferred*) |
-| Threads | **not available** on this target (*inferred*; the crate's guest needs one) |
+| Threads | **not available** on this target (*inferred*; the crate used one for a guest's connect, and no longer does there) |
 | `std::process::id()` | **panics** ("no pids on this platform"), observed |
 | Memory-mapped pixel file | not attempted (see "left out") |
 
-Consequences, all handled in the code:
+Consequences, as found in the first version (the crate now handles them, see the update at the top):
 
 * `rewrite_bridge::link::Link` (feature `link`) builds for the target. Run in the sandbox it **panics in the
   host path** (`random_session()` calls `std::process::id()` when a guest says hello) and its **guest connects
@@ -67,7 +80,7 @@ Consequences, all handled in the code:
   fail here, so `src/endpoint.rs` does the same two jobs with WASI random and `std::fs`.
 * The endpoint file cannot be created `0600`; the plugin cannot read its mode back either. The README tells the
   operator to start the server with `umask 077`. This is a deviation from 6.2 ("`open(O_CREAT|O_EXCL, 0600)`,
-  never a `chmod` after") that the sandbox forces. A native build of `endpoint.rs` does create it `0600`.
+  never a `chmod` after") that the sandbox forces. `Link` writes it the same way now: `0600` from the start on Unix, the umask's mode on WASI.
 * A plugin sees only its own data folder, so `endpoint_file` is a file name in it (the recommended
   `$XDG_RUNTIME_DIR/rewrite-link/` is unreachable). A guest-role server reads an endpoint file that its host wrote
   (or was copied) into the data folder.
@@ -104,9 +117,9 @@ All in `/home/user/pumpkin-link`.
 
 | Check | Command | Result |
 |---|---|---|
-| Unit tests: mapping with sign checks (13), collision (13), config (5), endpoint file and token (6), pose building (5) | `cargo test --no-default-features` | 42 passed |
+| Unit tests: mapping with sign checks (13), collision (13), config (5), endpoint file and token (6), pose building (5) | `cargo test --no-default-features` | 42 passed (the 6 of the endpoint file left with `src/endpoint.rs`) |
 | Bridge against real `rewrite-bridge` peers, in process over loopback (host with and without token, wrong token, `busy`, guest role, guest entities reaching the sink, taken port writes no file) | same | 7 passed |
-| Session rules against hand-written raw-socket peers (first line, `bye`, token-first and only the word `unauthorized`, `busy`, second hello, 65536-byte line, 1024-entity limit, stale poses, foreign session/address, collision assembly rules of 9.5, heartbeats, watchdog, EOF, focus request, guest role) | same | 20 passed |
+| Session rules (now `rewrite_bridge::link::Link`) against hand-written raw-socket peers (first line, `bye`, token-first and only the word `unauthorized`, `busy`, second hello, 65536-byte line, 1024-entity limit, stale poses, foreign session/address, collision assembly rules of 9.5, heartbeats, watchdog, EOF, focus request, guest role) | same | 20 passed |
 | MSRV 1.97 | `cargo +1.97.0 build --release --target wasm32-wasip2 && cargo +1.97.0 test --no-default-features` | passed |
 | Formatting | `cargo fmt --all -- --check` (and the same for `tools/sandbox-host`) | clean |
 | Clippy | `cargo clippy --all-targets --no-default-features -- -D warnings`; `cargo clippy --target wasm32-wasip2 --lib -- -D warnings`; same for the sandbox host | clean |
@@ -165,11 +178,10 @@ Notes on that table:
 
 | File | What |
 |---|---|
-| `src/session.rs` | both roles of the session from CONTRACT sections 2 and 6 to 9 (handshake, token check first, `busy`, close/drain, watchdog, heartbeat, entity limit, stale rules, collision assembly and pacing, datagram size rules) |
-| `src/bridge.rs` | players to entities and poses (feet position, view rotation, velocity from real displacement, yaw rate, TELEPORT), collision driver, guest-entity sink, `/link status` text, token start/stop |
+| `src/bridge.rs` | players to entities and poses (feet position, view rotation, velocity from real displacement, yaw rate, TELEPORT), collision driver, guest-entity sink, `/link status` text, the link's start and stop |
 | `src/mapping.rs` | CONTRACT 4 mapping with flip/scale/offset (mirror reverses winding) |
 | `src/collision.rs` | block boxes to triangles, face culling, cut to 925,696 nearest, fingerprint |
-| `src/config.rs`, `src/endpoint.rs` | the JSON config (keys of minecraft-link that apply), token and endpoint file |
+| `src/config.rs` | the JSON config (keys of minecraft-link that apply) |
 | `src/plugin.rs` | the Pumpkin glue (wasm only): players, blocks, block-display entities, `/link`, permission, scheduler |
 | `examples/`, `tools/sandbox-host/`, `scripts/live-test.sh`, `.github/workflows/ci.yml` | tests and CI |
 
