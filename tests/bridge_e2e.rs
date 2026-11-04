@@ -419,6 +419,49 @@ fn guest_role_publishes_players_to_a_real_host_with_and_without_token() {
 }
 
 #[test]
+fn a_guest_that_cannot_connect_says_why_in_the_status() {
+    // a port nothing listens on
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    for with_token in [false, true] {
+        let ep = temp_path(if with_token { "whytok" } else { "whyplain" });
+        let mut c = cfg();
+        c.port = port;
+        c.token_auth = with_token;
+        let mut b = Bridge::new(c, ep.clone());
+        b.start(Role::Guest).unwrap();
+        let mut sink = Sink::default();
+        let mut worlds = OneWorld(Floor);
+        let want = if with_token {
+            "connection: endpoint file"
+        } else {
+            "connection: cannot connect to 127.0.0.1:"
+        };
+        let end = Instant::now() + Duration::from_secs(3);
+        while Instant::now() < end && !b.status().join("\n").contains(want) {
+            b.tick(Tick {
+                now: Instant::now(),
+                players: &[],
+                worlds: &mut worlds,
+                guests: &mut sink,
+            });
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let status = b.status().join("\n");
+        assert!(status.contains(want), "{status}");
+        assert!(
+            status.contains("peer: none (connecting to a host)"),
+            "{status}"
+        );
+        b.stop(&mut sink);
+        cleanup(&ep);
+    }
+}
+
+#[test]
 fn a_second_guest_gets_busy_and_the_first_session_survives() {
     let ep = temp_path("busy");
     let mut b = Bridge::new(cfg(), ep.clone());
