@@ -42,6 +42,15 @@ fn channel_line(path: &str, w: u64, h: u64, slots: u64) -> String {
     )
 }
 
+/// Ticks the bridge until `done`, for at most five seconds.
+fn wait_for(b: &mut Bridge, done: impl Fn(&Bridge) -> bool) {
+    let end = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < end && !done(b) {
+        tick(b);
+    }
+    assert!(done(b), "{:?}", b.counters);
+}
+
 fn frame(frame: u64) -> Datagram {
     Datagram::Frame(FrameReady {
         frame,
@@ -73,6 +82,10 @@ fn frame_channels_frames_and_cameras_are_counted_and_nothing_else_happens() {
     for (path, w, h, slots) in channels {
         peer.write_line(&channel_line(path, w, h, slots));
     }
+    // A control line travels on TCP and a datagram on UDP, and nothing orders them. A `frame_channel` that
+    // arrives after a `Frame` starts the frame numbers again, which makes a stale frame count: so the
+    // datagrams wait until all four channels have been counted.
+    wait_for(&mut b, |b| b.counters.frames_ignored >= 4);
     peer.datagram(&Datagram::Camera(Camera::look_at(
         [0.0, 2.0, 10.0],
         [0.0; 3],
@@ -131,6 +144,7 @@ fn the_pixel_file_a_peer_names_is_never_opened() {
     let mut b = host();
     let mut peer = RawGuest::connect(&mut b);
     peer.write_line(&channel_line(fifo.to_str().unwrap(), 4, 4, 2));
+    wait_for(&mut b, |b| b.counters.frames_ignored >= 1);
     peer.datagram(&frame(1));
     let end = Instant::now() + Duration::from_millis(500);
     while Instant::now() < end {
