@@ -290,13 +290,40 @@ fn a_second_connection_gets_busy_and_the_first_is_untouched() {
     assert!(r.host.is_connected());
 }
 
+/// Waits for the session to end and returns the reason of the `Lost` event, and checks that the peer was told
+/// the same reason with a `bye` (section 6.1). Without the reason a test could pass on the watchdog, which
+/// ends a session that has gone quiet after two seconds whatever else is wrong.
+fn ended_because(r: &mut Rig, why: &str) {
+    let started = Instant::now();
+    assert!(r.until(|r| r.events.iter().any(|e| matches!(e, Event::Lost { .. }))));
+    let reason = r
+        .events
+        .iter()
+        .find_map(|e| match e {
+            Event::Lost { reason } => Some(reason.clone()),
+            _ => None,
+        })
+        .unwrap();
+    assert!(reason.contains(why), "ended with {reason:?}, not {why:?}");
+    assert!(
+        started.elapsed() < Duration::from_millis(1500),
+        "ended after {:?}: the watchdog, not the rule",
+        started.elapsed()
+    );
+    assert!(r.until(|r| r.bye_reason().is_some()));
+    assert!(
+        r.bye_reason().is_some_and(|b| b.contains(why)),
+        "{:?}",
+        r.bye_reason()
+    );
+    assert!(!r.host.is_connected());
+}
+
 #[test]
 fn a_second_hello_is_a_protocol_error_that_ends_the_session() {
     let mut r = Rig::handshake(Link::host(cfg()).unwrap());
     r.send(&hello_line(""));
-    assert!(r.until(|r| r.events.iter().any(|e| matches!(e, Event::Lost { .. }))));
-    assert!(r.bye_reason().is_some());
-    assert!(!r.host.is_connected());
+    ended_because(&mut r, "second hello");
 }
 
 #[test]
@@ -304,8 +331,7 @@ fn a_line_over_65536_bytes_ends_the_session() {
     let mut r = Rig::handshake(Link::host(cfg()).unwrap());
     let long = format!("{{\"type\":\"x\",\"pad\":\"{}\"}}\n", "a".repeat(65536));
     r.send(&long);
-    assert!(r.until(|r| r.events.iter().any(|e| matches!(e, Event::Lost { .. }))));
-    assert!(r.bye_reason().is_some());
+    ended_because(&mut r, "too long");
 }
 
 #[test]
@@ -919,10 +945,42 @@ fn datagrams_over_8192_bytes_are_malformed_if_the_kind_is_known_and_proof_of_lif
     r.udp.connect(("127.0.0.1", h.udp_port)).unwrap();
     r.session = h.session.unwrap();
 
-    r.udp.send(&raw_datagram(r.session, 4, 9000)).unwrap(); // a Collision of 9000 bytes
+    // A valid Collision of 226 triangles is exactly 8192 bytes; with 808 bytes more it is 9000. A receiver whose
+    // buffer holds only 8192 bytes would be handed the first 8192 and take them for the valid chunk (section 2);
+    // with the buffer the contract asks for it sees 9000 bytes and drops the datagram as malformed.
+    let chunk = Datagram::Collision(CollisionChunk {
+        query: 1,
+        chunk_index: 0,
+        chunk_count: 1,
+        center: [0.0; 3],
+        radius: 4.0,
+        triangles: vec![[[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]; 226],
+    });
+    let header = Header {
+        version: 1,
+        flags: 0,
+        session: r.session,
+        seq: 1,
+        time_us: now_us(),
+    };
+    let mut big = Vec::new();
+    encode_datagram(&header, &chunk, &mut big).unwrap();
+    assert_eq!(big.len(), 8192, "the chunk itself is valid and full");
+    r.udp.send(&big).unwrap();
     r.run(100);
     let s = r.host.stats();
-    assert_eq!((s.malformed, s.datagrams_received), (1, 0), "{s:?}");
+    assert_eq!(s.datagrams_received, 1, "{s:?}");
+    assert!(r.events.iter().any(|e| matches!(e, Event::Collision(_))));
+    r.events.clear();
+    big.resize(9000, 0);
+    r.udp.send(&big).unwrap();
+    r.run(100);
+    let s = r.host.stats();
+    assert_eq!((s.malformed, s.datagrams_received), (1, 1), "{s:?}");
+    assert!(
+        !r.events.iter().any(|e| matches!(e, Event::Collision(_))),
+        "the first 8192 bytes of a 9000 byte datagram were taken for a chunk"
+    );
 
     // only unknown-kind datagrams, for much longer than the 300 ms watchdog: the session stays up
     for _ in 0..16 {
@@ -930,7 +988,7 @@ fn datagrams_over_8192_bytes_are_malformed_if_the_kind_is_known_and_proof_of_lif
         r.run(50);
     }
     let s = r.host.stats();
-    assert_eq!((s.malformed, s.datagrams_received), (1, 16), "{s:?}");
+    assert_eq!((s.malformed, s.datagrams_received), (1, 17), "{s:?}");
     assert!(r.host.is_connected());
     assert!(r.until(|r| r.events.iter().any(|e| matches!(e, Event::Lost { .. }))));
 }
