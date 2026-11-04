@@ -68,7 +68,7 @@ as unsupported) and were not run. A probe plugin built against the Pumpkin API e
 | Random bytes (token, session) | work, from WASI `random` (`getrandom` crate); `/dev/urandom` and `libc::getrandom` do not exist |
 | Files in the data folder: exclusive create, write, rename, read | work (`fs.write.data`, folder preopened as `data`) |
 | File mode `0600` at creation, `chmod` | **not available** (no mode bits in WASI; *inferred*) |
-| `SO_RCVBUF` (contract 2: ask for 4 MiB) | **not available** through `std` (*inferred*) |
+| `SO_RCVBUF` (contract 2: ask for 4 MiB) | not available through `std`; **available through the WASI interface**: `set-receive-buffer-size` took the default 786896 to 4194304 under wasmtime 50 (the crate does this now) |
 | Threads | **not available** on this target (*inferred*; the crate used one for a guest's connect, and no longer does there) |
 | `std::process::id()` | **panics** ("no pids on this platform"), observed |
 | Memory-mapped pixel file | not attempted (see "left out") |
@@ -201,7 +201,7 @@ Notes on that table:
 * Per-player collision: one snapshot, centred on `collision_player` or the first player online.
 * Mapping of block shapes beyond the boxes the server reports: nothing is invented; a block with no collision
   box adds nothing.
-* `SO_RCVBUF` (contract 2): not available in the sandbox.
+* `SO_RCVBUF` (contract 2): not available through `std` in the sandbox; `rewrite-bridge` asks for it through the WASI interface now.
 * Port arguments on `/link host|guest`: the port is in the config.
 
 ## What needs a person with a Minecraft client or a built Pumpkin

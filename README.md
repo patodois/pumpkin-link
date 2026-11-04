@@ -157,12 +157,16 @@ It asks for no outbound network, HTTP, DNS, environment or system information.
 Both roles are `rewrite_bridge::link::Link`, polled once per server tick. On `wasm32-wasip2` there are no
 threads, no memory-mapped files and no way to set a file's mode, so there:
 
-* a guest connects inside `poll`, for at most 100 ms: an accept or a refusal on loopback takes well under a
-  millisecond, but a host that never accepts would leave the connect hanging, and the server's tick with it;
+* a guest connects inside `poll`, for at most 100 ms: an accept or a refusal on loopback took 0.2 to 0.7 ms in
+  the measurements on macOS, but a host that never accepts would leave the connect hanging, and the server's tick
+  with it. Where a refusal is slow (about two seconds on Windows) a guest with no host reports `timed out` after
+  each 100 ms, not `connection refused`;
 * a peer that holds its connection open and stops reading is not waited for: the runtime would hold the
   server's tick until the peer reads or exits (for ever on Linux), so the connection is set aside and closed
-  when the peer lets go; with four of them set aside the plugin takes no new connection until one is;
-* the pixel file is not available, and neither is the 4 MiB UDP receive buffer of CONTRACT section 2;
+  when the peer lets go; with four of them set aside the plugin takes no new connection until one is. The four
+  are counted for the whole server plugin, and `/link status` shows `connection: not accepting: …` while it lasts;
+* the pixel file is not available; the UDP socket is the WASI one (receiving through `std` leaks every
+  datagram's payload there), and the 4 MiB receive buffer of CONTRACT section 2 is asked for and granted;
 * the endpoint file gets the mode of the server's umask (see "Token" above).
 
 This needs a `rewrite-bridge` release that runs on that target; earlier ones panic when a host sees a guest's
