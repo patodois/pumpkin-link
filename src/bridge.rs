@@ -15,11 +15,9 @@
 
 use crate::collision::{BlockSource, Scan, Snapshot, fingerprint};
 use crate::config::{Config, Role};
-use crate::endpoint;
 use crate::mapping::{Mapping, wrap_degrees};
-use crate::session::{Session, SessionConfig};
 use rewrite_bridge::link::{
-    self, Event, MAX_ENTITIES, POSE_TELEPORT, Pose, Spawn, UNAUTHORIZED, now_us,
+    self, Event, Link, LinkConfig, MAX_ENTITIES, POSE_TELEPORT, Pose, Spawn, UNAUTHORIZED, now_us,
 };
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -132,10 +130,9 @@ pub struct Tick<'a> {
 pub struct Bridge {
     cfg: Config,
     endpoint_path: PathBuf,
-    link: Option<Session>,
+    link: Option<Link>,
     role: Role,
     token_active: bool,
-    wrote_endpoint: bool,
     tracked: HashMap<String, Tracked>,
     next_entity: u32,
     peer_entities: HashMap<u32, Spawn>,
@@ -156,7 +153,6 @@ impl Bridge {
             link: None,
             role,
             token_active: false,
-            wrote_endpoint: false,
             tracked: HashMap::new(),
             next_entity,
             peer_entities: HashMap::new(),
@@ -177,7 +173,7 @@ impl Bridge {
     }
 
     pub fn is_connected(&self) -> bool {
-        self.link.as_ref().is_some_and(Session::is_connected)
+        self.link.as_ref().is_some_and(Link::is_connected)
     }
 
     /// The control port actually bound (host) or being connected to (guest).
@@ -194,36 +190,21 @@ impl Bridge {
             return Err("the link is already running; stop it first".into());
         }
         self.role = role;
-        let mut lc = SessionConfig::new(GAME);
+        let mut lc = LinkConfig::new(GAME);
         lc.control_port = self.cfg.port;
         lc.udp_port = self.cfg.udp_port;
         lc.heartbeat = Duration::from_millis(u64::from(self.cfg.heartbeat_ms));
         lc.timeout = Duration::from_millis(u64::from(self.cfg.timeout_ms));
-        let mut token = None;
-        match (role, self.cfg.token_auth) {
-            (Role::Host, true) => {
-                let t = endpoint::generate_token().map_err(|e| format!("token: {e}"))?;
-                lc.token = Some(t.clone());
-                token = Some(t);
-            }
-            (Role::Guest, true) => lc.endpoint_file = Some(self.endpoint_path.clone()),
-            (_, false) => {}
+        if self.cfg.token_auth {
+            // A host makes the token and writes this file once its control port is bound (CONTRACT section
+            // 6.2, "Writing"), and removes it when the link is dropped; a guest reads port and token from it.
+            lc.endpoint_file = Some(self.endpoint_path.clone());
         }
         let link = match role {
-            Role::Host => Session::host(lc),
-            Role::Guest => Session::guest(lc),
+            Role::Host => Link::host(lc),
+            Role::Guest => Link::guest(lc),
         }
         .map_err(|e| format!("cannot start the {}: {e}", role_name(role)))?;
-        if let Some(t) = token {
-            // Only now, with the control port bound (CONTRACT section 6.2, "Writing").
-            let port = link
-                .control_addr()
-                .map(|a| a.port())
-                .ok_or("the host has no control port")?;
-            endpoint::write(&self.endpoint_path, port, &t)
-                .map_err(|e| format!("cannot write the endpoint file: {e}"))?;
-            self.wrote_endpoint = true;
-        }
         self.token_active = self.cfg.token_auth;
         self.link = Some(link);
         self.last_problem = None;
@@ -233,14 +214,9 @@ impl Bridge {
 
     /// Ends the session with a `bye` and releases the ports and the endpoint file.
     pub fn stop(&mut self, guests: &mut dyn GuestSink) {
-        if let Some(link) = self.link.take() {
-            // `bye` if there is a session, half-close, drain for at most 200 ms (CONTRACT section 6.1)
-            link.shutdown();
-        }
-        if self.wrote_endpoint {
-            endpoint::remove(&self.endpoint_path);
-            self.wrote_endpoint = false;
-        }
+        // Dropping the link says `bye` if there is a session, half-closes, drains for at most 200 ms
+        // (CONTRACT section 6.1) and removes the endpoint file it wrote.
+        drop(self.link.take());
         guests.clear();
         self.peer_entities.clear();
         for t in self.tracked.values_mut() {
@@ -344,7 +320,7 @@ impl Bridge {
         }
     }
 
-    fn publish_players(&mut self, link: &mut Session, t: &Tick<'_>) {
+    fn publish_players(&mut self, link: &mut Link, t: &Tick<'_>) {
         let map = self.cfg.mapping;
         // players that left
         let gone: Vec<String> = self
@@ -404,7 +380,7 @@ impl Bridge {
         }
     }
 
-    fn drive_collision(&mut self, link: &mut Session, t: &mut Tick<'_>) {
+    fn drive_collision(&mut self, link: &mut Link, t: &mut Tick<'_>) {
         let c = &mut self.collider;
         let centre = if self.cfg.collision_player.is_empty() {
             t.players.first()
@@ -462,7 +438,7 @@ impl Bridge {
         self.send_snapshot(link, snap, hash, t.now);
     }
 
-    fn send_snapshot(&mut self, link: &mut Session, snap: Snapshot, hash: u64, now: Instant) {
+    fn send_snapshot(&mut self, link: &mut Link, snap: Snapshot, hash: u64, now: Instant) {
         match link.send_collision(snap.centre, snap.radius, &snap.triangles) {
             Ok(_) => {
                 let c = &mut self.collider;

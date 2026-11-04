@@ -7,9 +7,7 @@
 pub mod bridge;
 pub mod collision;
 pub mod config;
-pub mod endpoint;
 pub mod mapping;
-pub mod session;
 
 #[cfg(all(feature = "plugin", target_arch = "wasm32"))]
 mod plugin;
