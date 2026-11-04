@@ -1,37 +1,28 @@
 //! What a peer's `frame_channel`, `Frame` and `Camera` do to the plugin: nothing but a count. A server has no
-//! renderer, so it never opens the pixel file a peer names. The file is untrusted input (CONTRACT section
-//! 9.6), and not touching it at all is the safe answer.
+//! renderer, so it has no use for the pixel file a peer names, and the file is untrusted input (CONTRACT
+//! section 9.6).
 //!
-//! The peer is a raw socket, the bridge is the real one. The test runs on every target; CI-style runs on
-//! `wasm32-wasip2` (where a panic aborts the plugin) use a runner that gives it the network:
+//! The peer is a raw socket, the bridge is the real one. The first test runs on every target, and on
+//! `wasm32-wasip2`, where a panic aborts the plugin, it needs a runner that gives it the network:
 //!
 //! ```text
 //! CARGO_TARGET_WASM32_WASIP2_RUNNER="wasmtime run -S inherit-network" \
 //!   cargo test --target wasm32-wasip2 --no-default-features --test peer_frames
 //! ```
+//!
+//! The second, on Unix, shows that the path is not opened: it names a named pipe, which blocks whoever opens
+//! it for reading until someone opens it for writing, and a thread of the test is waiting to be that writer.
 
-use pumpkin_link::bridge::{Bridge, NoGuests, NoWorlds, Tick};
+mod common;
+
+use common::{RawGuest, tick};
+use pumpkin_link::bridge::{Bridge, NoGuests};
 use pumpkin_link::config::{Config, Role};
-use rewrite_bridge::link::{
-    Camera, Control, Datagram, FrameReady, Header, encode_datagram, now_us,
-};
-use std::io::{Read, Write};
-use std::net::{TcpStream, UdpSocket};
+use rewrite_bridge::link::{Camera, Datagram, FrameReady};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-fn tick(b: &mut Bridge) {
-    b.tick(Tick {
-        now: Instant::now(),
-        players: &[],
-        worlds: &mut NoWorlds,
-        guests: &mut NoGuests,
-    });
-    std::thread::sleep(Duration::from_millis(3));
-}
-
-#[test]
-fn a_pixel_file_a_peer_names_is_counted_and_never_opened() {
+fn host() -> Bridge {
     // No token, so the bridge writes no endpoint file; the path is not used.
     let mut b = Bridge::new(
         Config {
@@ -41,37 +32,30 @@ fn a_pixel_file_a_peer_names_is_counted_and_never_opened() {
         PathBuf::from("endpoint.json"),
     );
     b.start(Role::Host).unwrap();
-    let port = b.control_port().unwrap();
+    b
+}
 
-    let mut tcp = TcpStream::connect(("127.0.0.1", port)).unwrap();
-    tcp.set_nonblocking(true).unwrap();
-    let udp = UdpSocket::bind("127.0.0.1:0").unwrap();
-    let hello = format!(
-        "{{\"type\":\"hello\",\"role\":\"guest\",\"game\":\"raw\",\"protocol\":1,\"min_protocol\":1,\
-         \"udp_port\":{},\"heartbeat_ms\":250,\"timeout_ms\":2000}}\n",
-        udp.local_addr().unwrap().port()
-    );
-    tcp.write_all(hello.as_bytes()).unwrap();
+fn channel_line(path: &str, w: u64, h: u64, slots: u64) -> String {
+    format!(
+        "{{\"type\":\"frame_channel\",\"path\":{},\"width\":{w},\"height\":{h},\"slots\":{slots}}}\n",
+        serde_json::to_string(path).unwrap()
+    )
+}
 
-    // The host's hello carries its UDP port and the session.
-    let mut text = String::new();
-    let end = Instant::now() + Duration::from_secs(5);
-    let reply = loop {
-        tick(&mut b);
-        let mut buf = [0u8; 1024];
-        if let Ok(n) = tcp.read(&mut buf) {
-            text.push_str(&String::from_utf8_lossy(&buf[..n]));
-        }
-        if let Some(line) = text.lines().next().filter(|_| text.contains('\n')) {
-            match Control::parse(line).unwrap() {
-                Control::Hello(h) => break h,
-                other => panic!("{other:?}"),
-            }
-        }
-        assert!(Instant::now() < end, "no hello from the host");
-    };
-    udp.connect(("127.0.0.1", reply.udp_port)).unwrap();
-    let session = reply.session.unwrap();
+fn frame(frame: u64) -> Datagram {
+    Datagram::Frame(FrameReady {
+        frame,
+        slot: 0,
+        camera_seq: 0,
+        width: 1280,
+        height: 720,
+    })
+}
+
+#[test]
+fn frame_channels_frames_and_cameras_are_counted_and_nothing_else_happens() {
+    let mut b = host();
+    let mut peer = RawGuest::connect(&mut b);
 
     // Pixel files that do not exist, a directory, a relative path, sizes no file could have, and a path with
     // characters a file name cannot hold; then a Camera and Frames for them.
@@ -87,27 +71,9 @@ fn a_pixel_file_a_peer_names_is_counted_and_never_opened() {
         ("/tmp/\u{1}\u{7f}\u{e9}/x", 1, 1, 1),
     ];
     for (path, w, h, slots) in channels {
-        let line = format!(
-            "{{\"type\":\"frame_channel\",\"path\":{},\"width\":{w},\"height\":{h},\"slots\":{slots}}}\n",
-            serde_json_string(path)
-        );
-        tcp.write_all(line.as_bytes()).unwrap();
+        peer.write_line(&channel_line(path, w, h, slots));
     }
-    let mut seq = 0;
-    let mut send = |body: &Datagram| {
-        let header = Header {
-            version: 1,
-            flags: 0,
-            session,
-            seq,
-            time_us: now_us(),
-        };
-        seq += 1;
-        let mut out = Vec::new();
-        encode_datagram(&header, body, &mut out).unwrap();
-        udp.send(&out).unwrap();
-    };
-    send(&Datagram::Camera(Camera::look_at(
+    peer.datagram(&Datagram::Camera(Camera::look_at(
         [0.0, 2.0, 10.0],
         [0.0; 3],
         1.0,
@@ -115,30 +81,16 @@ fn a_pixel_file_a_peer_names_is_counted_and_never_opened() {
         500.0,
         [1280, 720],
     )));
-    for frame in 1..=2 {
-        send(&Datagram::Frame(FrameReady {
-            frame,
-            slot: 0,
-            camera_seq: 0,
-            width: 1280,
-            height: 720,
-        }));
-    }
+    peer.datagram(&frame(1));
+    peer.datagram(&frame(2));
     // a frame that is stale, as the library counts them, is not counted by the bridge
-    send(&Datagram::Frame(FrameReady {
-        frame: 1,
-        slot: 0,
-        camera_seq: 0,
-        width: 1280,
-        height: 720,
-    }));
+    peer.datagram(&frame(1));
 
     let end = Instant::now() + Duration::from_secs(5);
     while Instant::now() < end && b.counters.frames_ignored < 6 {
         tick(&mut b);
     }
-    // four channels and two frames; one camera; the session is intact; the datagram that decoded is not
-    // an error either
+    // four channels and two frames; one camera; the session is intact
     assert_eq!(b.counters.frames_ignored, 6, "{:?}", b.counters);
     assert_eq!(b.counters.cameras_ignored, 1);
     assert!(b.is_connected(), "{:?}", b.status());
@@ -147,15 +99,52 @@ fn a_pixel_file_a_peer_names_is_counted_and_never_opened() {
         status.contains("1 cameras and 6 frame messages ignored"),
         "{status}"
     );
-    let mut sink = NoGuests;
-    b.stop(&mut sink);
-    // what the peer could still read is not an error message about the files
-    let mut rest = String::new();
-    let _ = tcp.read_to_string(&mut rest);
-    assert!(!rest.contains("frames"), "{rest}");
+    b.stop(&mut NoGuests);
 }
 
-/// A JSON string literal for `s`, with the escapes a path can need.
-fn serde_json_string(s: &str) -> String {
-    serde_json::to_string(s).unwrap()
+#[cfg(unix)]
+#[test]
+fn the_pixel_file_a_peer_names_is_never_opened() {
+    use std::fs::OpenOptions;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let dir = std::env::temp_dir().join(format!("pumpkin-link-fifo-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let fifo = dir.join("pixels.frames");
+    let made = std::process::Command::new("mkfifo")
+        .arg(&fifo)
+        .status()
+        .expect("mkfifo");
+    assert!(made.success());
+
+    // `open` for writing returns only when somebody opens the pipe for reading
+    let opened = Arc::new(AtomicBool::new(false));
+    let writer = {
+        let (opened, fifo) = (opened.clone(), fifo.clone());
+        std::thread::spawn(move || {
+            let _w = OpenOptions::new().write(true).open(&fifo);
+            opened.store(true, Ordering::SeqCst);
+        })
+    };
+
+    let mut b = host();
+    let mut peer = RawGuest::connect(&mut b);
+    peer.write_line(&channel_line(fifo.to_str().unwrap(), 4, 4, 2));
+    peer.datagram(&frame(1));
+    let end = Instant::now() + Duration::from_millis(500);
+    while Instant::now() < end {
+        tick(&mut b);
+    }
+    assert_eq!(b.counters.frames_ignored, 2, "{:?}", b.counters);
+    assert!(
+        !opened.load(Ordering::SeqCst),
+        "the plugin opened the pixel file the peer named"
+    );
+    // let the waiting writer go: opening the pipe for reading ourselves is what it waits for
+    let _reader = std::fs::File::open(&fifo).unwrap();
+    writer.join().unwrap();
+    b.stop(&mut NoGuests);
+    let _ = std::fs::remove_file(&fifo);
+    let _ = std::fs::remove_dir(&dir);
 }

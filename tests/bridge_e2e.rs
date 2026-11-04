@@ -10,7 +10,16 @@ use rewrite_bridge::link::{self, Event, Link, LinkConfig, Pose, Spawn};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::rc::Rc;
+use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
+
+/// The tests of this file run one at a time. One of them needs a port that nothing listens on, which it can
+/// only get by binding one and closing it; another test binding port 0 in between could be handed the same
+/// number.
+fn serial() -> MutexGuard<'static, ()> {
+    static LOCK: Mutex<()> = Mutex::new(());
+    LOCK.lock().unwrap_or_else(PoisonError::into_inner)
+}
 
 struct Floor;
 
@@ -121,6 +130,7 @@ fn guest_cfg(port: u16) -> LinkConfig {
 
 #[test]
 fn host_without_token_spawns_players_sends_poses_and_collision() {
+    let _serial = serial();
     let ep = temp_path("plain");
     let mut b = Bridge::new(cfg(), ep.clone());
     b.start(Role::Host).unwrap();
@@ -214,6 +224,7 @@ fn host_without_token_spawns_players_sends_poses_and_collision() {
 
 #[test]
 fn guest_entities_reach_the_sink_and_go_away_with_the_session() {
+    let _serial = serial();
     let ep = temp_path("sink");
     let mut b = Bridge::new(cfg(), ep.clone());
     b.start(Role::Host).unwrap();
@@ -285,6 +296,7 @@ fn guest_entities_reach_the_sink_and_go_away_with_the_session() {
 
 #[test]
 fn token_auth_writes_the_endpoint_after_binding_and_a_guest_with_the_file_connects() {
+    let _serial = serial();
     let ep = temp_path("token");
     let mut c = cfg();
     c.token_auth = true;
@@ -319,6 +331,7 @@ fn token_auth_writes_the_endpoint_after_binding_and_a_guest_with_the_file_connec
 
 #[test]
 fn a_guest_without_the_token_or_with_a_wrong_one_is_refused_as_unauthorized() {
+    let _serial = serial();
     let ep = temp_path("wrong");
     let mut c = cfg();
     c.token_auth = true;
@@ -351,6 +364,7 @@ fn a_guest_without_the_token_or_with_a_wrong_one_is_refused_as_unauthorized() {
 
 #[test]
 fn guest_role_publishes_players_to_a_real_host_with_and_without_token() {
+    let _serial = serial();
     for with_token in [false, true] {
         let ep = temp_path(if with_token { "gtok" } else { "gplain" });
         let mut lc = LinkConfig::new("test host");
@@ -420,6 +434,7 @@ fn guest_role_publishes_players_to_a_real_host_with_and_without_token() {
 
 #[test]
 fn a_guest_that_cannot_connect_says_why_in_the_status() {
+    let _serial = serial();
     // a port nothing listens on
     let port = std::net::TcpListener::bind("127.0.0.1:0")
         .unwrap()
@@ -463,6 +478,7 @@ fn a_guest_that_cannot_connect_says_why_in_the_status() {
 
 #[test]
 fn a_second_guest_gets_busy_and_the_first_session_survives() {
+    let _serial = serial();
     let ep = temp_path("busy");
     let mut b = Bridge::new(cfg(), ep.clone());
     b.start(Role::Host).unwrap();
@@ -502,6 +518,7 @@ fn a_second_guest_gets_busy_and_the_first_session_survives() {
 
 #[test]
 fn start_twice_and_a_taken_port_are_errors_that_leave_no_endpoint_file() {
+    let _serial = serial();
     let ep = temp_path("taken");
     let mut c = cfg();
     c.token_auth = true;
