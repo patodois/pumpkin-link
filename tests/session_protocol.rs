@@ -786,14 +786,21 @@ fn heartbeats_at_one_poll_per_tick_stay_inside_one_tick_of_the_interval() {
     let mut r = tick_rig(cfg()); // heartbeat 250 ms, the default
     let mut arrival = Vec::new();
     let start = Instant::now();
-    for _ in 0..52 {
-        r.tick();
+    let mut lost = false;
+    for n in 0..52 {
+        // The peer beats too: a silent one is dropped at the watchdog (2 s here), after which the host sends no
+        // more heartbeats, so the count would depend on how long the 50 ms sleeps really take (they take 55 to 60 ms).
+        if n % 4 == 0 {
+            r.datagram(&Datagram::Heartbeat);
+        }
+        lost |= r.tick().iter().any(|e| matches!(e, Event::Lost { .. }));
         for (kind, _) in r.received() {
             if kind == 1 {
                 arrival.push(start.elapsed());
             }
         }
     }
+    assert!(!lost, "the session was lost although the peer beats");
     let gaps: Vec<u128> = arrival
         .windows(2)
         .map(|w| (w[1] - w[0]).as_millis())
