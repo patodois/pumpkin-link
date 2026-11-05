@@ -127,8 +127,10 @@ that its host wrote into the same data folder (copy it there, or have the host w
 `0600` from the start as section 6.2 asks. The file gets what the server process's umask leaves: 0644 under the
 usual umask 022, 0600 under 077 (measured under wasmtime). Under 022 other users can read the token, and a guest built on
 `rewrite-bridge` refuses the file because group and others can read it, so such a server cannot serve a native
-guest. The plugin cannot read the mode back either. Start the server with `umask 077`, or keep the data folder
-to yourself (mode 0700), when you use the token. On Windows there is no umask; the folder's ACL is what counts.
+guest. The plugin cannot read the mode back either. Start the server with `umask 077`: that makes the file 0600
+and lets both a native guest and the plugin use it. Keeping the data folder to yourself (mode 0700) keeps other users
+away from the token, but under umask 022 the file in it is still 0644 and a native guest still refuses it. On
+Windows there is no umask; the folder's ACL is what counts.
 
 ## Permissions it asks for, and why
 
@@ -165,8 +167,12 @@ threads, no memory-mapped files and no way to set a file's mode, so there:
   server's tick until the peer reads or exits (for ever on Linux), so the connection is set aside and closed
   when the peer lets go; with four of them set aside the plugin takes no new connection until one is. The four
   are counted for the whole server plugin, and `/link status` shows `connection: not accepting: …` while it lasts;
+* `set_nodelay` does nothing there, so small control lines can be held back a few milliseconds and arrive
+  together: a pose can arrive before its `spawn` and be dropped as the pose of an unknown entity, which the
+  contract allows;
 * the pixel file is not available; the UDP socket is the WASI one (receiving through `std` leaks every
-  datagram's payload there), and the 4 MiB receive buffer of CONTRACT section 2 is asked for and granted;
+  datagram's payload there), and the 4 MiB receive buffer of CONTRACT section 2 is asked for (under wasmtime on macOS it was granted; not
+  measured elsewhere);
 * the endpoint file gets the mode of the server's umask (see "Token" above).
 
 This needs a `rewrite-bridge` release that runs on that target; earlier ones panic when a host sees a guest's
