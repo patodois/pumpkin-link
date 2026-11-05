@@ -6,11 +6,13 @@
 use crate::bridge::{Bridge, GuestSink, PlayerSample, Tick, Worlds};
 use crate::collision::{BlockSource, Cell};
 use crate::config::{Config, Role};
+use crate::displays::{DisplayWorld, Displays, Found, KEY, NAMESPACE, Tag};
 use pumpkin_plugin_api::command::{
     Command, CommandError, CommandNode, CommandSender, ConsumedArgs,
 };
 use pumpkin_plugin_api::commands::CommandHandler;
 use pumpkin_plugin_api::common::BlockPos;
+use pumpkin_plugin_api::persistent_data::PersistentDataHolder;
 use pumpkin_plugin_api::permission::{Permission, PermissionDefault, PermissionLevel};
 use pumpkin_plugin_api::permissions as perm;
 use pumpkin_plugin_api::scheduler::SchedulerExt;
@@ -156,21 +158,30 @@ impl Worlds for WorldBlocks<'_> {
 // ---------------------------------------------------------------------------------------------
 // The guest's entities, shown as block displays (as minecraft-link does on the client)
 
+/// The server's half of `displays::Displays`: spawn tagged block displays, move them, list the tagged ones.
 #[derive(Default)]
-struct DisplaySink {
+struct PumpkinDisplays {
     /// The world the guest's entities are shown in: the server's first world, set on the first tick.
     world: Option<World>,
+    /// Every world, refreshed before each sweep.
+    worlds: Vec<World>,
     block_state: Option<u16>,
-    shown: HashMap<u32, Entity>,
 }
 
-impl GuestSink for DisplaySink {
-    fn spawn(&mut self, entity: u32, _spawn: &Spawn) {
+impl DisplayWorld for PumpkinDisplays {
+    type Handle = Entity;
+
+    fn create(&mut self, tag: &Tag) -> Option<(Entity, u32)> {
         let (Some(world), Some(state)) = (&self.world, self.block_state) else {
-            tracing::warn!("pumpkin-link: guest entity {entity} not shown (no world or no block)");
-            return;
+            tracing::warn!(
+                "pumpkin-link: guest entity {} not shown (no world or no block)",
+                tag.guest
+            );
+            return None;
         };
         let e = world.spawn_entity(EntityType::BlockDisplay, (0.0, 0.0, 0.0));
+        // Saved with the entity: the sweep finds it again after a chunk reload or a restart.
+        e.set_string(NAMESPACE, KEY, &tag.encode());
         if let Some(b) = BlockDisplayEntity::from_entity(&e) {
             b.set_block_state_id(state);
             if let Some(d) = pumpkin_plugin_api::DisplayEntity::from_entity(&e) {
@@ -182,37 +193,100 @@ impl GuestSink for DisplaySink {
                 );
             }
         }
+        let id = e.get_id();
         tracing::info!(
-            "pumpkin-link: guest entity {entity} shown as block display (server entity id {})",
+            "pumpkin-link: guest entity {} shown as block display (server entity id {id})",
+            tag.guest
+        );
+        Some((e, id))
+    }
+
+    fn place(&mut self, e: &Entity, pos: [f64; 3], yaw: f32, pitch: f32) {
+        e.teleport((pos[0], pos[1], pos[2]), e.get_world());
+        e.set_rotation(yaw, pitch);
+    }
+
+    fn remove(&mut self, e: &Entity) {
+        tracing::info!(
+            "pumpkin-link: guest entity removed (server entity id {})",
             e.get_id()
         );
-        self.shown.insert(entity, e);
+        e.remove();
+    }
+
+    fn scan(&mut self) -> Vec<Found<Entity>> {
+        let mut out = Vec::new();
+        for w in &self.worlds {
+            for e in w.get_entities() {
+                if let Some(tag) = e
+                    .get_string(NAMESPACE, KEY)
+                    .and_then(|t| Tag::parse(&t))
+                {
+                    out.push(Found {
+                        server_id: e.get_id(),
+                        handle: e,
+                        tag,
+                    });
+                }
+            }
+        }
+        out
+    }
+}
+
+struct DisplaySink {
+    inner: Displays<PumpkinDisplays>,
+    ticks: u32,
+}
+
+impl DisplaySink {
+    fn new(block_state: Option<u16>) -> Self {
+        let world = PumpkinDisplays {
+            block_state,
+            ..PumpkinDisplays::default()
+        };
+        Self {
+            inner: Displays::new(world, format!("{:x}", rewrite_bridge::link::now_us())),
+            ticks: 0,
+        }
+    }
+
+    /// Once a second while a link runs, every two seconds otherwise: remove what the world holds of ours
+    /// that should not be there, and re-bind a reloaded display (see `displays`).
+    fn tick(&mut self, server: &Server, running: bool) {
+        self.ticks += 1;
+        if self.ticks < if running { 20 } else { 40 } {
+            return;
+        }
+        self.ticks = 0;
+        let w = self.inner.world();
+        w.worlds = server.get_all_worlds();
+        if w.world.is_none() {
+            w.world = server.get_all_worlds().into_iter().next();
+        }
+        self.inner.sweep();
+    }
+}
+
+impl GuestSink for DisplaySink {
+    fn spawn(&mut self, entity: u32, _spawn: &Spawn) {
+        self.inner.spawn(entity);
     }
 
     fn pose(&mut self, entity: u32, pos: [f64; 3], yaw: f32, pitch: f32, _teleport: bool) {
-        if let Some(e) = self.shown.get(&entity) {
-            e.teleport((pos[0], pos[1], pos[2]), e.get_world());
-            e.set_rotation(yaw, pitch);
-        }
+        self.inner.pose(entity, pos, yaw, pitch);
     }
 
     fn despawn(&mut self, entity: u32) {
-        if let Some(e) = self.shown.remove(&entity) {
-            tracing::info!(
-                "pumpkin-link: guest entity {entity} removed (server entity id {})",
-                e.get_id()
-            );
-            e.remove();
-        }
+        self.inner.despawn(entity);
     }
 
     fn clear(&mut self) {
-        if !self.shown.is_empty() {
-            tracing::info!("pumpkin-link: {} guest entities cleared", self.shown.len());
+        let n = self.inner.len();
+        if n > 0 {
+            tracing::info!("pumpkin-link: {n} guest entities cleared");
         }
-        for (_, e) in self.shown.drain() {
-            e.remove();
-        }
+        self.inner.clear();
     }
 }
 
@@ -231,13 +305,12 @@ fn on_tick(server: Server) {
     let Some(st) = guard.as_mut() else {
         return;
     };
-    if !st.bridge.is_running() {
+    let running = st.bridge.is_running();
+    st.guests.tick(&server, running);
+    if !running {
         return;
     }
     let players = samples(&server);
-    if st.guests.world.is_none() {
-        st.guests.world = server.get_all_worlds().into_iter().next();
-    }
     let State {
         bridge,
         cells,
@@ -303,8 +376,9 @@ impl CommandHandler for Start {
     ) -> Result<i32, CommandError> {
         let role = self.0;
         with_state(|st| {
-            if st.guests.world.is_none() {
-                st.guests.world = server.get_all_worlds().into_iter().next();
+            let w = st.guests.inner.world();
+            if w.world.is_none() {
+                w.world = server.get_all_worlds().into_iter().next();
             }
             st.bridge.start(role)
         })?
@@ -400,11 +474,9 @@ impl Plugin for PumpkinLink {
         let endpoint = std::path::PathBuf::from(format!("{dir}/{endpoint_name}"));
         let auto = cfg.auto_start && config_error.is_none();
         let role = cfg.role;
-        let guests = DisplaySink {
-            block_state: resolve_block(&cfg.guest_block),
-            ..DisplaySink::default()
-        };
-        if cfg.show_guests && guests.block_state.is_none() {
+        let block_state = resolve_block(&cfg.guest_block);
+        let guests = DisplaySink::new(block_state);
+        if cfg.show_guests && block_state.is_none() {
             tracing::warn!(
                 "pumpkin-link: guest_block names no block of this server; guests are not shown"
             );

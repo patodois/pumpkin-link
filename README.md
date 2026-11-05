@@ -103,6 +103,21 @@ tick divided by the time between ticks as velocity, the yaw change as angular ve
 (`flip_x` xor `flip_z`) the facing is mirrored and the triangles' winding is reversed so they stay
 counter-clockwise from outside. All of it is in `src/mapping.rs` with its tests.
 
+## Guest displays
+
+The guest's entities are block displays in the server's first world. Each one is tagged in the entity's own
+persistent data (`pumpkin-link` / `guest` = `<session>:<guest entity>`), which the server saves with the entity, and
+the plugin sweeps the tagged entities of every world once a second while a link runs (every two seconds
+otherwise). That is what keeps a display from outliving its session:
+
+* a chunk that unloads and loads again brings the display back as a new entity: the plugin takes it over (the
+  poses move it again at once) and removes any duplicate;
+* `/link stop`, a lost session and unloading the plugin remove the displays, the reloaded copies too;
+* a display left in a saved world by an earlier run (the server killed, a crash) is removed when its chunk loads;
+* an entity without our tag (a map maker's or another plugin's block displays) is never touched.
+
+Pumpkin only lists entities of loaded chunks, so a leftover in a chunk nobody has loaded is removed when the chunk loads.
+
 ## Collision
 
 A snapshot is the collision boxes the server already holds for each block state (the plugin API's
