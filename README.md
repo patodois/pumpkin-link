@@ -99,7 +99,16 @@ so with the defaults a position maps to itself. Directions are converted: yaw 0 
 grows clockwise, pitch +90 looks down, the entity rotation is `Ry(-yaw) * Rx(pitch)` so its front (+Z)
 is the view direction. A pose is the feet position, the view rotation, the displacement since the last
 tick divided by the time between ticks as velocity, the yaw change as angular velocity about +Y, and the
-`TELEPORT` flag on a player's first pose and after a jump of more than 8 blocks. With a mirror
+`TELEPORT` flag on a player's first pose and after a jump of more than 8 blocks.
+
+A jump of 8 blocks or less (a console `tp` of a few blocks, say) carries no `TELEPORT` flag, as in
+minecraft-link, so for one pose it looks like fast motion: its velocity is the jump divided by the time between two
+ticks, and a guest that extrapolates with it overshoots for a moment.
+
+**What a guest entity's pose is.** The block display is drawn centred on the pose's translation (a 1 m block, translation
+-0.5 on all three axes), as `minecraft-link`'s `RemoteEntities` does. CONTRACT section 9.4 says only "world position", and the
+`fake_guest` example puts its cube's *centre* at the pose (0.8 m above the ground for a 1.6 m cube), so a block resting on
+the ground is posed 0.5 m above it. The pose's `scale` is not applied. With a mirror
 (`flip_x` xor `flip_z`) the facing is mirrored and the triangles' winding is reversed so they stay
 counter-clockwise from outside. All of it is in `src/mapping.rs` with its tests.
 
@@ -125,6 +134,12 @@ A snapshot is the collision boxes the server already holds for each block state 
 costs about its top. The world is read one horizontal layer per tick, so a radius of 16 takes about 1.7 s
 to rescan; an unchanged result is sent again only every 5 s. A snapshot over the contract's 925,696
 triangles is cut to the nearest ones and announces the smaller radius (`/link status` says so).
+
+**After a join.** For a few ticks after a player joins, Pumpkin holds it at a position of its own (the world spawn, `0 100 0` in a
+default world) until the client's first position arrives. The plugin publishes that position and may centre one snapshot on it
+(on a desert world it was empty, 0 triangles); it cannot tell that state from a player who really stands there, since the plugin API has no
+"the client has confirmed its position" call, so it does not hide it. The first pose carries `TELEPORT`, the jump to the real position
+is flagged the same way, and the next scan, at most `collision_interval_ms` plus about 1.7 s later, replaces the snapshot.
 
 ## Token (optional, CONTRACT 6.2)
 
