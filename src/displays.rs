@@ -166,7 +166,11 @@ impl<W: DisplayWorld> Displays<W> {
         let mut changed = 0;
         for f in found {
             let ours = f.tag.session == session;
-            let Some(s) = (if ours { self.shown.get_mut(&f.tag.guest) } else { None }) else {
+            let Some(s) = (if ours {
+                self.shown.get_mut(&f.tag.guest)
+            } else {
+                None
+            }) else {
                 self.world.remove(&f.handle);
                 changed += 1;
                 continue;
@@ -293,7 +297,11 @@ mod tests {
         assert!(d.spawn(90));
         d.pose(90, [1.0, 2.0, 3.0], 0.0, 0.0);
         assert_eq!(d.world().loaded[0].pos, [1.0, 2.0, 3.0]);
-        assert_eq!(d.sweep(), 0, "nothing to do while everything is as it should be");
+        assert_eq!(
+            d.sweep(),
+            0,
+            "nothing to do while everything is as it should be"
+        );
         d.despawn(90);
         assert_eq!(d.world().count(), 0);
     }
@@ -317,10 +325,18 @@ mod tests {
         let before = d.world().loaded[0].id;
         // without the sweep a pose reaches nothing
         d.pose(90, [9.0, 9.0, 9.0], 0.0, 0.0);
-        assert_eq!(d.world().at(before).unwrap().pos, [5.0, 6.0, 7.0], "the stale handle moved nothing");
+        assert_eq!(
+            d.world().at(before).unwrap().pos,
+            [5.0, 6.0, 7.0],
+            "the stale handle moved nothing"
+        );
         assert_eq!(d.sweep(), 1);
         assert_eq!(d.world().count(), 1, "adopted, not duplicated");
-        assert_eq!(d.world().at(before).unwrap().pos, [9.0, 9.0, 9.0], "the last pose is applied to it at once");
+        assert_eq!(
+            d.world().at(before).unwrap().pos,
+            [9.0, 9.0, 9.0],
+            "the last pose is applied to it at once"
+        );
         d.pose(90, [1.0, 1.0, 1.0], 0.0, 0.0);
         assert_eq!(d.world().at(before).unwrap().pos, [1.0, 1.0, 1.0]);
         d.despawn(90);
@@ -380,7 +396,11 @@ mod tests {
         }
         .encode();
         d.world().foreign(Some(&old_epoch));
-        assert_eq!(d.sweep(), 1, "the tag of the previous epoch is not this session's");
+        assert_eq!(
+            d.sweep(),
+            1,
+            "the tag of the previous epoch is not this session's"
+        );
         assert_eq!(d.world().count(), 1);
     }
 
@@ -420,6 +440,11 @@ mod tests {
         // the four are still there (as new entities after the reload)
         assert_eq!(d.world().count(), 4, "{:?}", (a, b, c, e));
         assert!(d.world().loaded.iter().any(|x| x.tag.is_none()));
-        assert!(d.world().loaded.iter().any(|x| x.tag.as_deref() == Some("other-plugin:data")));
+        assert!(
+            d.world()
+                .loaded
+                .iter()
+                .any(|x| x.tag.as_deref() == Some("other-plugin:data"))
+        );
     }
 }

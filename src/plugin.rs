@@ -12,9 +12,9 @@ use pumpkin_plugin_api::command::{
 };
 use pumpkin_plugin_api::commands::CommandHandler;
 use pumpkin_plugin_api::common::BlockPos;
-use pumpkin_plugin_api::persistent_data::PersistentDataHolder;
 use pumpkin_plugin_api::permission::{Permission, PermissionDefault, PermissionLevel};
 use pumpkin_plugin_api::permissions as perm;
+use pumpkin_plugin_api::persistent_data::PersistentDataHolder;
 use pumpkin_plugin_api::scheduler::SchedulerExt;
 use pumpkin_plugin_api::text::TextComponent;
 use pumpkin_plugin_api::{
@@ -218,10 +218,7 @@ impl DisplayWorld for PumpkinDisplays {
         let mut out = Vec::new();
         for w in &self.worlds {
             for e in w.get_entities() {
-                if let Some(tag) = e
-                    .get_string(NAMESPACE, KEY)
-                    .and_then(|t| Tag::parse(&t))
-                {
+                if let Some(tag) = e.get_string(NAMESPACE, KEY).and_then(|t| Tag::parse(&t)) {
                     out.push(Found {
                         server_id: e.get_id(),
                         handle: e,
