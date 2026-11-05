@@ -251,16 +251,18 @@ impl DisplaySink {
     /// Once a second while a link runs, every two seconds otherwise: remove what the world holds of ours
     /// that should not be there, and re-bind a reloaded display (see `displays`).
     fn tick(&mut self, server: &Server, running: bool) {
+        // Every tick until it exists, before the bridge's tick: with `auto_start` a guest can spawn within the
+        // first ticks of the server, and a spawn that finds no world is lost until the sweep retries it.
+        let w = self.inner.world();
+        if w.world.is_none() {
+            w.world = server.get_all_worlds().into_iter().next();
+        }
         self.ticks += 1;
         if self.ticks < if running { 20 } else { 40 } {
             return;
         }
         self.ticks = 0;
-        let w = self.inner.world();
         w.worlds = server.get_all_worlds();
-        if w.world.is_none() {
-            w.world = server.get_all_worlds().into_iter().next();
-        }
         self.inner.sweep();
     }
 }

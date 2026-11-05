@@ -73,7 +73,13 @@ struct Shown<H> {
     handle: H,
     server_id: u32,
     last: Option<([f64; 3], f32, f32)>,
+    /// Sweeps in a row that did not list the handle's entity: its chunk is unloaded, or it is gone.
+    missed: u32,
 }
+
+/// A display the world is not listing for this many sweeps in a row is taken as gone (one miss can be a
+/// sweep that ran before the world listed a display just spawned).
+const GONE_AFTER_MISSES: u32 = 2;
 
 pub struct Displays<W: DisplayWorld> {
     world: W,
@@ -82,6 +88,8 @@ pub struct Displays<W: DisplayWorld> {
     /// Bumped each time the guest's entities are cleared, so one session's tags are not the next one's.
     epoch: u32,
     shown: HashMap<u32, Shown<W::Handle>>,
+    /// Guest entities whose spawn could not be shown yet (the server had no world), with the last pose sent for them.
+    wanted: HashMap<u32, Option<([f64; 3], f32, f32)>>,
 }
 
 impl<W: DisplayWorld> Displays<W> {
@@ -91,6 +99,7 @@ impl<W: DisplayWorld> Displays<W> {
             run,
             epoch: 0,
             shown: HashMap::new(),
+            wanted: HashMap::new(),
         }
     }
 
@@ -114,13 +123,10 @@ impl<W: DisplayWorld> Displays<W> {
         self.shown.contains_key(&guest)
     }
 
+    /// Shows the guest's entity; when it cannot be shown yet (no world) it is kept and retried by the next sweep.
     pub fn spawn(&mut self, guest: u32) -> bool {
         self.despawn(guest);
-        let tag = Tag {
-            session: self.session(),
-            guest,
-        };
-        match self.world.create(&tag) {
+        match self.create(guest) {
             Some((handle, server_id)) => {
                 self.shown.insert(
                     guest,
@@ -128,15 +134,45 @@ impl<W: DisplayWorld> Displays<W> {
                         handle,
                         server_id,
                         last: None,
+                        missed: 0,
                     },
                 );
                 true
             }
-            None => false,
+            None => {
+                self.wanted.insert(guest, None);
+                false
+            }
         }
     }
 
+    fn create(&mut self, guest: u32) -> Option<(W::Handle, u32)> {
+        let tag = Tag {
+            session: self.session(),
+            guest,
+        };
+        self.world.create(&tag)
+    }
+
     pub fn pose(&mut self, guest: u32, pos: [f64; 3], yaw: f32, pitch: f32) {
+        if let Some(w) = self.wanted.get_mut(&guest) {
+            *w = Some((pos, yaw, pitch));
+            return;
+        }
+        let gone = self
+            .shown
+            .get(&guest)
+            .is_some_and(|s| s.missed >= GONE_AFTER_MISSES);
+        if gone && let Some((handle, server_id)) = self.create(guest) {
+            // Its chunk has been unloaded since and nothing came back: show it again here, where the guest is
+            // now. If the old chunk loads later, its copy is a duplicate of a live display and the sweep removes it.
+            if let Some(s) = self.shown.get_mut(&guest) {
+                self.world.remove(&s.handle);
+                s.handle = handle;
+                s.server_id = server_id;
+                s.missed = 0;
+            }
+        }
         if let Some(s) = self.shown.get_mut(&guest) {
             self.world.place(&s.handle, pos, yaw, pitch);
             s.last = Some((pos, yaw, pitch));
@@ -144,13 +180,15 @@ impl<W: DisplayWorld> Displays<W> {
     }
 
     pub fn despawn(&mut self, guest: u32) {
+        self.wanted.remove(&guest);
         if let Some(s) = self.shown.remove(&guest) {
             self.world.remove(&s.handle);
         }
     }
 
-    /// The session is over: removes every display, the reloaded copies of them too, and starts a new session.
+    /// The session is over: removes every display, the reloaded copies too, and starts a new session.
     pub fn clear(&mut self) {
+        self.wanted.clear();
         for (_, s) in self.shown.drain() {
             self.world.remove(&s.handle);
         }
@@ -158,8 +196,28 @@ impl<W: DisplayWorld> Displays<W> {
         self.sweep();
     }
 
-    /// Looks at the tagged entities of the world (see the module's rules) and returns how many it removed or adopted.
+    /// Retries the spawns that could not be shown, then looks at the tagged entities of the world (see the
+    /// module's rules); returns how many it removed or adopted.
     pub fn sweep(&mut self) -> usize {
+        let wanted: Vec<u32> = self.wanted.keys().copied().collect();
+        for guest in wanted {
+            let Some((handle, server_id)) = self.create(guest) else {
+                break; // still no world
+            };
+            let last = self.wanted.remove(&guest).flatten();
+            if let Some((pos, yaw, pitch)) = last {
+                self.world.place(&handle, pos, yaw, pitch);
+            }
+            self.shown.insert(
+                guest,
+                Shown {
+                    handle,
+                    server_id,
+                    last,
+                    missed: 0,
+                },
+            );
+        }
         let found = self.world.scan();
         let alive: Vec<u32> = found.iter().map(|f| f.server_id).collect();
         let session = self.session();
@@ -183,11 +241,19 @@ impl<W: DisplayWorld> Displays<W> {
             } else {
                 s.handle = f.handle;
                 s.server_id = f.server_id;
+                s.missed = 0;
                 if let Some((pos, yaw, pitch)) = s.last {
                     self.world.place(&s.handle, pos, yaw, pitch);
                 }
             }
             changed += 1;
+        }
+        for s in self.shown.values_mut() {
+            if alive.contains(&s.server_id) {
+                s.missed = 0;
+            } else {
+                s.missed += 1;
+            }
         }
         changed
     }
@@ -445,6 +511,125 @@ mod tests {
                 .loaded
                 .iter()
                 .any(|x| x.tag.as_deref() == Some("other-plugin:data"))
+        );
+    }
+
+    /// A world whose `create` fails until it is told the world exists (the server had not loaded its worlds yet).
+    #[derive(Default)]
+    struct Late {
+        inner: Fake,
+        ready: bool,
+    }
+    impl DisplayWorld for Late {
+        type Handle = u32;
+        fn create(&mut self, tag: &Tag) -> Option<(u32, u32)> {
+            if self.ready {
+                self.inner.create(tag)
+            } else {
+                None
+            }
+        }
+        fn place(&mut self, h: &u32, pos: [f64; 3], yaw: f32, pitch: f32) {
+            self.inner.place(h, pos, yaw, pitch)
+        }
+        fn remove(&mut self, h: &u32) {
+            self.inner.remove(h)
+        }
+        fn scan(&mut self) -> Vec<Found<u32>> {
+            self.inner.scan()
+        }
+    }
+
+    #[test]
+    fn a_spawn_that_could_not_be_shown_is_retried_once_the_world_exists() {
+        // auto_start: the guest's spawn arrives before the first sweep has found a world
+        let mut d = Displays::new(Late::default(), "run1".into());
+        assert!(!d.spawn(90));
+        d.pose(90, [4.0, 5.0, 6.0], 0.0, 0.0); // poses for it are kept, not dropped
+        assert_eq!(d.sweep(), 0);
+        assert_eq!(d.world().inner.count(), 0, "still no world");
+        d.world().ready = true;
+        d.sweep();
+        assert_eq!(d.world().inner.count(), 1);
+        assert_eq!(
+            d.world().inner.loaded[0].pos,
+            [4.0, 5.0, 6.0],
+            "shown at the last pose it was sent"
+        );
+        assert!(d.is_shown(90));
+        // a despawn in the meantime cancels the retry
+        let mut d = Displays::new(Late::default(), "run1".into());
+        d.spawn(7);
+        d.despawn(7);
+        d.world().ready = true;
+        d.sweep();
+        assert_eq!(d.world().inner.count(), 0);
+    }
+
+    #[test]
+    fn a_display_whose_chunk_stays_unloaded_is_shown_again_at_the_next_pose() {
+        let mut d = displays();
+        d.spawn(90);
+        d.pose(90, [5.0, 6.0, 7.0], 0.0, 0.0);
+        d.world().unload(); // and no reload: the guest's place stays unloaded
+        d.sweep();
+        d.sweep();
+        d.sweep();
+        // the guest walks to where the host's player is: a pose arrives
+        d.pose(90, [1.0, 2.0, 3.0], 0.0, 0.0);
+        assert_eq!(d.world().loaded.len(), 1, "a new display exists");
+        assert_eq!(d.world().loaded[0].pos, [1.0, 2.0, 3.0]);
+        // later the old chunk loads again: the old copy is a duplicate of a live display and goes
+        d.world().reload();
+        assert_eq!(d.world().count(), 2);
+        d.sweep();
+        assert_eq!(d.world().count(), 1, "the reloaded old copy was removed");
+        assert_eq!(d.world().loaded[0].pos, [1.0, 2.0, 3.0]);
+        d.pose(90, [9.0, 9.0, 9.0], 0.0, 0.0);
+        assert_eq!(d.world().loaded[0].pos, [9.0, 9.0, 9.0]);
+    }
+
+    #[test]
+    fn one_missed_sweep_does_not_recreate_a_display() {
+        // the sweep may run before the world lists a display that was just spawned: no second display
+        let mut d = displays();
+        d.spawn(90);
+        let id = d.world().loaded[0].id;
+        let hidden = d.world().loaded.remove(0);
+        d.sweep(); // not listed this time
+        d.world().loaded.push(hidden);
+        d.pose(90, [1.0, 1.0, 1.0], 0.0, 0.0);
+        assert_eq!(d.world().count(), 1);
+        assert_eq!(d.world().at(id).unwrap().pos, [1.0, 1.0, 1.0]);
+    }
+
+    #[test]
+    fn the_tag_names_the_session_and_a_clear_starts_the_next_one() {
+        let mut d = displays();
+        d.spawn(1);
+        assert_eq!(d.world().loaded[0].tag.as_deref(), Some("run1-0:1"));
+        d.clear();
+        d.spawn(1);
+        assert_eq!(
+            d.world().loaded[0].tag.as_deref(),
+            Some("run1-1:1"),
+            "the epoch moved on"
+        );
+    }
+
+    #[test]
+    fn a_tag_of_another_session_is_never_adopted_even_for_a_guest_that_is_shown() {
+        let mut d = displays();
+        d.spawn(1);
+        d.world().unload(); // the plugin's own display is gone from the world (handle dead)
+        d.world().foreign(Some("run1-9:1")); // another session's display for the same guest id
+        d.sweep();
+        assert!(
+            d.world()
+                .loaded
+                .iter()
+                .all(|e| e.tag.as_deref() != Some("run1-9:1")),
+            "removed, not taken over"
         );
     }
 }
