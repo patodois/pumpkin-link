@@ -69,6 +69,38 @@ jobs:
       - run: cargo build --release --target wasm32-wasip2
       - run: cargo test --no-default-features
 
+  wasm-tests:
+    name: protocol tests on wasm32-wasip2 under wasmtime
+    runs-on: ubuntu-latest
+    # A wasm component cannot be interrupted from inside: a hang must fail the job, not hold it for six hours.
+    timeout-minutes: 25
+    env:
+      WASMTIME_VERSION: 50.0.1
+      WASMTIME_SHA256: 685466455dd42a14774a86c36c8f2e45cbb9bd6d92a850139315df60a75498a5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip2
+      - uses: Swatinem/rust-cache@v2
+      - name: Install wasmtime
+        run: |
+          name="wasmtime-v${WASMTIME_VERSION}-x86_64-linux"
+          curl -sSfL -o "$name.tar.xz" "https://github.com/bytecodealliance/wasmtime/releases/download/v${WASMTIME_VERSION}/$name.tar.xz"
+          echo "$WASMTIME_SHA256  $name.tar.xz" | sha256sum --check
+          tar -xJf "$name.tar.xz"
+          echo "$PWD/$name" >> "$GITHUB_PATH"
+      - name: The raw-socket protocol tests, the tick tests and the pixel-file test
+        timeout-minutes: 15
+        env:
+          # `timeout` kills a test binary that has not finished in 5 minutes (the longest takes about 20 seconds);
+          # cargo then reports status 124 of the binary and exits with 101, and the step fails.
+          CARGO_TARGET_WASM32_WASIP2_RUNNER: "timeout 300 wasmtime run -C cache=n -S inherit-network"
+        run: |
+          for t in peer_frames bridge_ticks session_protocol; do
+            cargo test --target wasm32-wasip2 --no-default-features --test "$t"
+          done
+
   sandbox:
     name: end to end in the WASI sandbox
     runs-on: ubuntu-latest
