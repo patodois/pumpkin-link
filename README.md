@@ -8,11 +8,10 @@ game or rewrite on the same machine, and shows that program's entities in the wo
 
 **NOT AN OFFICIAL MINECRAFT PRODUCT. NOT APPROVED BY OR ASSOCIATED WITH MOJANG OR MICROSOFT.**
 
-> **Status.** The protocol, the mapping, the collision snapshots, the config and the token run and are
-> tested, natively and inside a WASI sandbox with the rules Pumpkin gives a plugin. The thin layer that
-> talks to Pumpkin's plugin API (`src/plugin.rs`) has **not been run in a Pumpkin server** yet: building
-> Pumpkin needs the game's data files, which this project never downloads. See "How it is tested" and
-> `CLOUD-REPORT.md`.
+> **Status.** The protocol, the mapping, the collision snapshots, the config and the token are tested natively
+> and inside a WASI sandbox with the rules Pumpkin gives a plugin. The plugin has also run in a real Pumpkin server
+> with a real Minecraft 26.3 client on a local test world: poses, exact collision, the guest entity, `/link status`
+> and `/link stop`, and a soak of about 11 minutes. See "How it is tested".
 
 ## What it does
 
