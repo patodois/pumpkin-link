@@ -632,6 +632,57 @@ mod tests {
     }
 
     #[test]
+    fn misses_that_are_not_in_a_row_never_add_up() {
+        // listed again in between: the count starts over, so two separate misses are not "gone"
+        let mut d = displays();
+        d.spawn(90);
+        let id = d.world().loaded[0].id;
+        let hidden = d.world().loaded.remove(0);
+        d.sweep(); // a miss
+        d.world().loaded.push(hidden);
+        d.sweep(); // listed: the count starts over
+        let hidden = d.world().loaded.remove(0);
+        d.sweep(); // one miss again, not two in a row
+        d.world().loaded.push(hidden);
+        d.pose(90, [1.0, 1.0, 1.0], 0.0, 0.0);
+        assert_eq!(d.world().count(), 1, "no second display");
+        assert_eq!(d.world().at(id).unwrap().pos, [1.0, 1.0, 1.0]);
+    }
+
+    #[test]
+    fn a_display_shown_again_is_not_made_again_by_every_pose_that_follows() {
+        let mut d = displays();
+        d.spawn(90);
+        d.world().unload(); // and no reload
+        d.sweep();
+        d.sweep();
+        d.pose(90, [1.0, 2.0, 3.0], 0.0, 0.0); // shown again here
+        assert_eq!(d.world().loaded.len(), 1);
+        let id = d.world().loaded[0].id;
+        d.pose(90, [4.0, 5.0, 6.0], 0.0, 0.0);
+        d.pose(90, [7.0, 8.0, 9.0], 0.0, 0.0);
+        assert_eq!(d.world().loaded.len(), 1, "still the one display");
+        assert_eq!(d.world().loaded[0].id, id, "the same one, followed");
+        assert_eq!(d.world().loaded[0].pos, [7.0, 8.0, 9.0]);
+    }
+
+    #[test]
+    fn a_clear_forgets_the_spawns_that_were_waiting_for_a_world() {
+        let mut d = Displays::new(Late::default(), "run1".into());
+        assert!(!d.spawn(90));
+        d.pose(90, [4.0, 5.0, 6.0], 0.0, 0.0);
+        d.clear(); // the session is over while there is still no world
+        d.world().ready = true;
+        d.sweep();
+        assert_eq!(
+            d.world().inner.count(),
+            0,
+            "nothing from the old session shows up later"
+        );
+        assert!(!d.is_shown(90));
+    }
+
+    #[test]
     fn the_tag_names_the_session_and_a_clear_starts_the_next_one() {
         let mut d = displays();
         d.spawn(1);
