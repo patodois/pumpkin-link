@@ -590,6 +590,34 @@ mod tests {
     }
 
     #[test]
+    fn a_display_is_shown_again_after_exactly_two_missed_sweeps() {
+        let mut d = displays();
+        d.spawn(90);
+        d.pose(90, [5.0, 6.0, 7.0], 0.0, 0.0);
+        d.world().unload(); // and no reload
+        d.sweep(); // the first sweep that does not list it
+        d.pose(90, [1.0, 2.0, 3.0], 0.0, 0.0);
+        assert_eq!(
+            d.world().loaded.len(),
+            0,
+            "after one missed sweep no new display is made: that sweep may only have run too early"
+        );
+        d.sweep(); // the second
+        d.pose(90, [4.0, 5.0, 6.0], 0.0, 0.0);
+        assert_eq!(
+            d.world().loaded.len(),
+            1,
+            "after exactly two missed sweeps it is shown again"
+        );
+        assert_eq!(d.world().loaded[0].pos, [4.0, 5.0, 6.0]);
+        // the old chunk loads later: its copy is removed
+        d.world().reload();
+        assert_eq!(d.world().count(), 2);
+        d.sweep();
+        assert_eq!(d.world().count(), 1, "the reloaded old copy was removed");
+    }
+
+    #[test]
     fn one_missed_sweep_does_not_recreate_a_display() {
         // the sweep may run before the world lists a display that was just spawned: no second display
         let mut d = displays();
