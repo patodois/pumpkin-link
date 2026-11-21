@@ -71,7 +71,11 @@ pub struct Scan {
     next_layer: usize,
     /// Layers whose faces have been made (they need the layer above them).
     built_layers: usize,
+    centre: [f64; 3],
     radius_blocks: u32,
+    /// The distance, in blocks, from the centre to the nearest block the source could not give (an unloaded
+    /// chunk): the snapshot covers no farther than that.
+    nearest_unknown: f64,
     map: Mapping,
     link_centre: [f32; 3],
     nearest: Nearest,
@@ -112,7 +116,9 @@ impl Scan {
             cells: vec![None; side * side * side],
             next_layer: 0,
             built_layers: 0,
+            centre,
             radius_blocks: radius,
+            nearest_unknown: f64::INFINITY,
             map,
             link_centre: map.position(centre),
             nearest: Nearest::new(limit),
@@ -142,6 +148,16 @@ impl Scan {
                         self.min[1] + ly as i32,
                         self.min[2] + lz as i32,
                     );
+                    if cell.is_none() {
+                        let block = [
+                            f64::from(self.min[0]) + lx as f64,
+                            f64::from(self.min[1]) + ly as f64,
+                            f64::from(self.min[2]) + lz as f64,
+                        ];
+                        self.nearest_unknown = self
+                            .nearest_unknown
+                            .min(distance_to_block(self.centre, block));
+                    }
                     let i = self.index(lx, ly, lz);
                     self.cells[i] = cell;
                 }
@@ -210,9 +226,11 @@ impl Scan {
     }
 
     /// The snapshot of a finished scan, cut to the limit: the nearest triangles stay, in scan order, and the
-    /// radius becomes the distance of the nearest one dropped.
+    /// radius becomes the distance of the nearest one dropped. Blocks the source could not give (unloaded
+    /// chunks) are unknown, not empty, so the radius also stops at the nearest of them.
     pub fn finish(self) -> Snapshot {
-        let radius = (f64::from(self.radius_blocks) * self.map.scale) as f32;
+        let radius =
+            (f64::from(self.radius_blocks).min(self.nearest_unknown) * self.map.scale) as f32;
         let (triangles, total, nearest_dropped) = self.nearest.into_parts();
         Snapshot {
             centre: self.link_centre,
@@ -368,6 +386,16 @@ fn push_face(
     );
     out.push([c0, c1, c2]);
     out.push([c0, c2, c3]);
+}
+
+/// The distance from `p` to the unit cube of the block whose lowest corner is `block`, in blocks.
+fn distance_to_block(p: [f64; 3], block: [f64; 3]) -> f64 {
+    let mut d2 = 0.0;
+    for k in 0..3 {
+        let d = (block[k] - p[k]).max(p[k] - (block[k] + 1.0)).max(0.0);
+        d2 += d * d;
+    }
+    d2.sqrt()
 }
 
 fn distance_to_bounds(p: [f32; 3], t: &Tri) -> f32 {
@@ -565,7 +593,31 @@ mod tests {
         }
         let mut s = Scan::new([0.0, 0.0, 0.0], 1, Mapping::default());
         s.advance(&mut None_, 3);
-        assert!(s.finish().triangles.is_empty());
+        let snap = s.finish();
+        assert!(snap.triangles.is_empty());
+        assert_eq!(snap.radius, 0.0, "nothing around the centre is known");
+    }
+
+    #[test]
+    fn the_radius_stops_at_the_nearest_unloaded_block() {
+        // loaded for x < 3, unloaded from x = 3 on
+        struct HalfLoaded;
+        impl BlockSource for HalfLoaded {
+            fn cell(&mut self, x: i32, y: i32, _: i32) -> Option<Rc<Cell>> {
+                (x < 3).then(|| if y < 0 { Cell::cube() } else { Cell::empty() })
+            }
+        }
+        let map = Mapping {
+            scale: 2.0,
+            ..Mapping::default()
+        };
+        let mut s = Scan::new([0.5, 0.5, 0.5], 8, map);
+        let n = s.layers();
+        s.advance(&mut HalfLoaded, n);
+        let snap = s.finish();
+        // the block at x = 3 starts 2.5 blocks from the centre: 5 m at 2 m a block
+        assert_eq!(snap.radius, 5.0);
+        assert!(!snap.triangles.is_empty());
     }
 
     #[test]

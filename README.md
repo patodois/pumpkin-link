@@ -147,7 +147,8 @@ costs about its top. The world is read one horizontal layer per tick, so a radiu
 to rescan; an unchanged result is sent again only every 5 s. The triangles of each layer are made in the same
 tick, as soon as the layer above it has been read. A snapshot over the contract's 925,696 triangles is cut to the
 nearest ones and announces the smaller radius (`/link status` says so); the cut happens while the layers are
-read, so a scan never holds more than that many triangles, whatever the radius and the terrain.
+read, so a scan never holds more than that many triangles, whatever the radius and the terrain. Blocks of a chunk
+the server has not loaded are unknown, not empty: the announced radius stops at the nearest of them.
 
 **After a join.** For a few ticks after a player joins, Pumpkin can report a position of its own (the world spawn) until the
 client's first position arrives. The plugin publishes that position and may centre one snapshot on it; it cannot tell that state
