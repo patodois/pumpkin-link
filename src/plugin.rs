@@ -43,8 +43,11 @@ struct State {
     task: Option<u32>,
 }
 
-// SAFETY-free note: `Rc` stays inside this state, which is only reachable through the mutex below, and a
-// WebAssembly component has one thread.
+// SAFETY: `State` holds `Rc`s, which are not `Send` because two threads could touch one count at once. Here
+// there is one thread: a WebAssembly module without the `atomics` feature cannot start another, and the state
+// is only reachable through the mutex below, so no `Rc` is ever seen by two threads. A build with `atomics`
+// (threads) drops this impl, and then the `static` below no longer compiles instead of becoming unsound.
+#[cfg(not(target_feature = "atomics"))]
 unsafe impl Send for State {}
 
 static STATE: Mutex<Option<State>> = Mutex::new(None);
