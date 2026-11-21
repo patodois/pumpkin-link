@@ -9,9 +9,12 @@ game or rewrite on the same machine, and shows that program's entities in the wo
 **NOT AN OFFICIAL MINECRAFT PRODUCT. NOT APPROVED BY OR ASSOCIATED WITH MOJANG OR MICROSOFT.**
 
 > **Status.** The protocol, the mapping, the collision snapshots, the config and the token are tested natively
-> and inside a WASI sandbox with the rules Pumpkin gives a plugin. The plugin has also run in a real Pumpkin server
-> with a real Minecraft 26.3 client on a local test world: poses, exact collision, the guest entity, `/link status`
-> and `/link stop`, and a soak of about 11 minutes. See "How it is tested".
+> and inside a WASI sandbox with the rules Pumpkin gives a plugin; CI runs both. The glue to Pumpkin's API
+> (`src/plugin.rs`: reading players and blocks, the block displays, the commands) has no automated test: it only
+> builds for WebAssembly, and `scripts/live-test.sh --server pumpkin` runs a real Pumpkin server with no player, so
+> it reports the checks that need one as NEEDS-CLIENT. A manual session with a Minecraft client on a local test world
+> was reported during development, but no record of it (log, Pumpkin commit, what was seen) is kept here, so this
+> README does not count it. See "How it is tested".
 
 ## What it does
 
@@ -144,9 +147,9 @@ tick, as soon as the layer above it has been read. A snapshot over the contract'
 nearest ones and announces the smaller radius (`/link status` says so); the cut happens while the layers are
 read, so a scan never holds more than that many triangles, whatever the radius and the terrain.
 
-**After a join.** For a few ticks after a player joins, Pumpkin holds it at a position of its own (the world spawn, `0 100 0` in a
-default world) until the client's first position arrives. The plugin publishes that position and may centre one snapshot on it
-(on a desert world it was empty, 0 triangles); it cannot tell that state from a player who really stands there, since the plugin API has no
+**After a join.** For a few ticks after a player joins, Pumpkin can report a position of its own (the world spawn) until the
+client's first position arrives. The plugin publishes that position and may centre one snapshot on it; it cannot tell that state
+from a player who really stands there, since the plugin API has no
 "the client has confirmed its position" call, so it does not hide it. The first pose carries `TELEPORT`, the jump to the real position
 is flagged the same way, and the next scan, at most `collision_interval_ms` plus about 1.7 s later, replaces the snapshot.
 
@@ -188,12 +191,20 @@ It asks for no outbound network, HTTP, DNS, environment or system information.
 
 * `cargo test --no-default-features`: unit tests (mapping, config, collision), the rules of the protocol checked with hand-written peers
   on raw sockets, and end-to-end tests of the bridge against real `rewrite-bridge` peers over loopback.
+* The raw-socket protocol tests, the tick tests and the pixel-file test also run on `wasm32-wasip2` under wasmtime
+  (CI job `wasm-tests`).
 * `scripts/live-test.sh --server sandbox`: runs the same code as a WebAssembly component in
   `tools/sandbox-host` (wasmtime-wasi with Pumpkin's socket and folder rules) and drives it with the
-  `rewrite-bridge` examples and `examples/linkpeer.rs`, with and without the token and with a wrong one.
+  `rewrite-bridge` examples, built from the commit `Cargo.lock` pins, and `examples/linkpeer.rs`, with and without
+  the token and with a wrong one. CI runs it (job `sandbox`). The sandbox has no Pumpkin in it: its players and
+  blocks are made up by `examples/sandbox_server.rs`.
 * `scripts/live-test.sh --server pumpkin`: the same cases against a real Pumpkin built from source at the
-  pinned release tag in a temporary folder. It needs `PUMPKIN_MINECRAFT_SERVER_JAR`, a server jar you
-  already have, because Pumpkin's build reads the game's data from it; the script never downloads it.
+  pinned release tag in a temporary folder, with nobody online, so the checks that need a player (peers seeing
+  players and poses, a collision snapshot) are reported as NEEDS-CLIENT and do not fail the run. It needs
+  `PUMPKIN_MINECRAFT_SERVER_JAR`, a server jar you already have, because Pumpkin's build reads the game's data
+  from it; the script never downloads it. It is not run by CI, and no result of it is kept in this repository.
+* Not tested by anything here: the plugin with a player on the server (poses of real players, collision of real
+  blocks, block displays seen in game).
 
 ## The link
 

@@ -5,8 +5,9 @@
 #   scripts/live-test.sh --server pumpkin   # a real Pumpkin server built from source (needs YOUR copy of the game's server jar)
 #
 # What it does, in a temporary folder outside this repository (nothing is written to the repository):
-#   1. builds the plugin (wasm32-wasip2) and, for rewrite-bridge 0.3.0 from crates.io, its examples
-#      `fake_guest`, `fake_host`, `interop_peer` and `conformance`;
+#   1. builds the plugin (wasm32-wasip2) and the rewrite-bridge examples `fake_guest`, `fake_host` and
+#      `interop_peer` at the commit Cargo.lock pins for the plugin (a git clone, checked against that commit id),
+#      so the peers speak the same contract revision as the plugin;
 #   2. `--server pumpkin`: clones Pumpkin at the pinned commit and builds it; installs the plugin;
 #      `--server sandbox`: builds tools/sandbox-host and the `sandbox_server` example;
 #   3. starts the server headless once per case, runs the peers, stops it, and checks the answers:
@@ -24,7 +25,8 @@
 # permission prompt needs a terminal). The link is started and stopped from the server console (`link host`,
 # `link guest`, `link status`, `link stop`, `stop`). With nobody online the server has no players to publish and no
 # collision centre, so the checks that need them (peers seeing players, a collision snapshot) are reported as
-# NEEDS-CLIENT and are not counted as passes; they do not fail the run.
+# NEEDS-CLIENT and are not counted as passes; they do not fail the run. No run of this script has had a player: what
+# the plugin does with real players and real blocks (src/plugin.rs) is not tested by it.
 #
 # Environment: LINK_PORT (default 47811), JAVA_PORT (default 25599), KEEP=1 (keep the temporary folder), WORK (use
 # this folder).
@@ -36,14 +38,20 @@ REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # `pumpkin:plugin@0.1.0` ABI) this plugin is built against: the tag 0.2.1+26.3-26.51.
 PUMPKIN_REPO="https://github.com/Pumpkin-MC/Pumpkin.git"
 PUMPKIN_COMMIT="224f9f8144ca53a8d0800acb87607d714196e2a6"
-RB_VERSION="0.3.0"
+# The rewrite-bridge the plugin links, as Cargo.lock pins it: the peers are built from that same commit.
+RB_REPO="https://github.com/patodois/rewrite-bridge"
+RB_COMMIT="$(sed -n 's|^source = "git+https://github.com/patodois/rewrite-bridge?rev=[0-9a-f]*#\([0-9a-f]\{40\}\)"$|\1|p' "$REPO/Cargo.lock")"
+if [ -z "$RB_COMMIT" ]; then
+  echo "Cargo.lock pins no rewrite-bridge commit; this script builds the peers from the pinned one" >&2
+  exit 2
+fi
 PORT="${LINK_PORT:-47811}"
 JAVA_PORT="${JAVA_PORT:-25599}"
 SERVER="sandbox"
 while [ $# -gt 0 ]; do
   case "$1" in
     --server) SERVER="${2:-}"; shift 2 ;;
-    -h|--help) sed -n '2,32p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,34p' "$0"; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
@@ -87,13 +95,15 @@ cp "$WORK/target/wasm32-wasip2/release/pumpkin_link.wasm" "$WORK/pumpkin_link.pl
 PLUGIN_WASM="$WORK/pumpkin_link.plugin.wasm"
 ls -l "$PLUGIN_WASM"
 
-mkdir -p "$WORK/rb"
-if [ ! -d "$WORK/rb/rewrite-bridge-$RB_VERSION" ]; then
-  curl -fsSL "https://crates.io/api/v1/crates/rewrite-bridge/$RB_VERSION/download" -o "$WORK/rb.tgz" \
-    && tar xzf "$WORK/rb.tgz" -C "$WORK/rb" || { echo "cannot fetch rewrite-bridge $RB_VERSION"; exit 1; }
+RB="$WORK/rewrite-bridge"
+if [ ! -d "$RB/.git" ]; then
+  git clone --quiet "$RB_REPO" "$RB" || { echo "cannot clone rewrite-bridge"; exit 1; }
 fi
-RB="$WORK/rb/rewrite-bridge-$RB_VERSION"
-(cd "$RB" && cargo build --release --features link --example fake_guest --example fake_host --example interop_peer --example conformance) \
+git -C "$RB" checkout --quiet --detach "$RB_COMMIT" || { echo "cannot check out rewrite-bridge $RB_COMMIT"; exit 1; }
+# The commit id is the check: git refuses objects whose contents do not hash to it.
+[ "$(git -C "$RB" rev-parse HEAD)" = "$RB_COMMIT" ] || { echo "rewrite-bridge is not at $RB_COMMIT"; exit 1; }
+echo "rewrite-bridge peers at $RB_COMMIT"
+(cd "$RB" && cargo build --locked --release --features link --example fake_guest --example fake_host --example interop_peer) \
   > "$WORK/logs/build-rb.log" 2>&1 || { tail -20 "$WORK/logs/build-rb.log"; echo "rewrite-bridge examples failed"; exit 1; }
 (cd "$REPO" && cargo build --release --no-default-features --example linkpeer) \
   > "$WORK/logs/build-peer.log" 2>&1 || { tail -20 "$WORK/logs/build-peer.log"; echo "linkpeer build failed"; exit 1; }
@@ -238,8 +248,8 @@ check() { # name command...   (the command's last output line is the detail)
   if [ $code -eq 0 ]; then record "$name" PASS "${last:0:70}"; else record "$name" FAIL "${last:0:70}"; fi
 }
 
-grep_log() { # name pattern file   (colour codes of the server's log are removed first)
-  if sed 's/\x1b\[[0-9;]*m//g' "$3" | grep -q -- "$2"; then record "$1" PASS "found: $2"; else record "$1" FAIL "missing in server log: $2"; fi
+grep_log() { # name pattern file   (colour codes of the server's log are removed first; $'\033' works with BSD sed too)
+  if sed $'s/\033\\[[0-9;]*m//g' "$3" | grep -q -- "$2"; then record "$1" PASS "found: $2"; else record "$1" FAIL "missing in server log: $2"; fi
 }
 
 # ---------------------------------------------------------------------------------------------
@@ -285,9 +295,11 @@ run_host_case() { # label extra-config
   if [ "$SERVER" = pumpkin ]; then
     console "link status"; sleep 2
   fi
-  if [ "$label" = token ] && [ -s "$DATA/endpoint.json" ]; then
-    TOKEN="$(sed -n 's/.*"token":"\([0-9a-f]*\)".*/\1/p' "$DATA/endpoint.json")"
-    cp "$DATA/endpoint.json" "$WORK/logs/last-endpoint-file.txt" 2>/dev/null
+  if [ "$label" = token ]; then
+    # The file itself is not copied into the logs: it holds the token, and KEEP=1 keeps the logs.
+    TOKEN=""
+    [ -s "$DATA/endpoint.json" ] && TOKEN="$(sed -n 's/.*"token":"\([0-9a-f]*\)".*/\1/p' "$DATA/endpoint.json")"
+    [ -n "$TOKEN" ] || record "host/token: the token appears in no log" FAIL "cannot read the token from the endpoint file"
   fi
   if [ "$SERVER" = pumpkin ]; then
     # `link stop` at the console: the port is released and no endpoint file is left, with the server still running
@@ -299,7 +311,7 @@ run_host_case() { # label extra-config
   fi
   stop_server
   if [ "$label" = token ] && [ -n "${TOKEN:-}" ]; then
-    if grep -rqF -- "$TOKEN" "$SERVER_LOG" "$WORK/logs"/linkpeer*.log "$WORK/logs"/host_token*.log 2>/dev/null; then
+    if grep -rqF -- "$TOKEN" "$SERVER_LOG" "$WORK/logs" 2>/dev/null; then
       record "host/token: the token appears in no log" FAIL "token found in a log"
     else record "host/token: the token appears in no log" PASS "not in the server or peer logs"; fi
   fi
@@ -392,10 +404,6 @@ if [ "$SERVER" = sandbox ]; then
   check "plugin: component loads, metadata and permissions" bash -c \
     "'$SANDBOX_HOST' --inspect '$PLUGIN_WASM' | tee /dev/stderr | grep -q 'permissions.*network.tcp.*network.udp.*network.loopback.*fs.write.data' && echo 'tcp, udp, loopback, fs.write.data'"
 fi
-
-step "rewrite-bridge conformance example (a checker for asset providers: it says nothing about the link)"
-"$RBBIN/conformance" > "$WORK/logs/conformance.log" 2>&1; ccode=$?
-record "info: rewrite-bridge conformance example ran" "$([ $ccode -eq 1 ] && echo PASS || echo FAIL)" "exit $ccode (1 is its normal answer on the toy provider)"
 
 run_host_case plain ""
 run_host_case token ", \"token_auth\": true"
