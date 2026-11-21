@@ -12,7 +12,7 @@
 
 use pumpkin_link::bridge::{Bridge, GuestSink, PlayerSample, Tick, Worlds};
 use pumpkin_link::collision::{BlockSource, Cell};
-use pumpkin_link::config::Config;
+use pumpkin_link::config::{Config, Loaded};
 use rewrite_bridge::link::Spawn;
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -81,17 +81,16 @@ fn main() {
     let floor: i32 = arg("--floor").unwrap_or(64);
     let dir = "data";
     let cfg_path = format!("{dir}/pumpkin-link.json");
-    let cfg = match std::fs::read_to_string(&cfg_path) {
-        Ok(t) => match Config::parse(&t) {
-            Ok(c) => c,
-            Err(e) => {
-                eprintln!("config: {e}");
-                std::process::exit(2);
-            }
-        },
-        Err(_) => {
+    // the plugin's rule: only a missing file is written, a broken one is left as it is
+    let cfg = match Loaded::from_read(std::fs::read_to_string(&cfg_path)) {
+        Loaded::Valid(c) => c,
+        Loaded::Missing => {
             let _ = std::fs::write(&cfg_path, Config::default_text());
             Config::default()
+        }
+        Loaded::Broken(e) => {
+            eprintln!("config: {e}");
+            std::process::exit(2);
         }
     };
     let name = if cfg.endpoint_file.is_empty() {
