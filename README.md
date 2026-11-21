@@ -139,8 +139,10 @@ Pumpkin only lists entities of loaded chunks, so a leftover in a chunk nobody ha
 A snapshot is the collision boxes the server already holds for each block state (the plugin API's
 `collision-shapes`), turned into triangles: faces hidden behind a full block are left out, so solid ground
 costs about its top. The world is read one horizontal layer per tick, so a radius of 16 takes about 1.7 s
-to rescan; an unchanged result is sent again only every 5 s. A snapshot over the contract's 925,696
-triangles is cut to the nearest ones and announces the smaller radius (`/link status` says so).
+to rescan; an unchanged result is sent again only every 5 s. The triangles of each layer are made in the same
+tick, as soon as the layer above it has been read. A snapshot over the contract's 925,696 triangles is cut to the
+nearest ones and announces the smaller radius (`/link status` says so); the cut happens while the layers are
+read, so a scan never holds more than that many triangles, whatever the radius and the terrain.
 
 **After a join.** For a few ticks after a player joins, Pumpkin holds it at a position of its own (the world spawn, `0 100 0` in a
 default world) until the client's first position arrives. The plugin publishes that position and may centre one snapshot on it

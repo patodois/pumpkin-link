@@ -4,7 +4,8 @@
 //! The server already holds each block state's collision shapes as boxes in block-local coordinates
 //! (the `collision-shapes` of the plugin API's `block-state`); nothing is invented here. A [`Scan`]
 //! reads the blocks one horizontal layer at a time, so a tick never reads more than it is given
-//! budget for, and [`Scan::build`] turns the boxes into triangles:
+//! budget for, and turns the boxes of each layer into triangles as soon as the layer above it is read
+//! ([`Scan::finish`] hands over the result):
 //!
 //! * a box face lying on the boundary of its block is left out when a full block sits behind it, and
 //!   the faces of two adjacent full blocks that touch disappear on both sides, so solid ground costs
@@ -15,6 +16,7 @@
 
 use crate::mapping::Mapping;
 use rewrite_bridge::link::{MAX_COLLISION_CHUNKS, MAX_TRIANGLES};
+use std::collections::BinaryHeap;
 use std::rc::Rc;
 
 /// The most triangles one snapshot may hold (4096 chunks of 226).
@@ -56,14 +58,23 @@ pub trait BlockSource {
     fn cell(&mut self, x: i32, y: i32, z: i32) -> Option<Rc<Cell>>;
 }
 
-/// An in-progress read of the cube of blocks around a centre block.
+/// An in-progress read of the cube of blocks around a centre block, turned into triangles as it goes.
+///
+/// The work of one [`Scan::advance`] is bounded by the layers it is given, whatever the radius and the
+/// terrain: each layer is read and, as soon as the layer above it is known, its faces are made, mapped to
+/// link space and offered to [`Nearest`], which never holds more than the limit. So no step builds every
+/// triangle of the cube first and cuts afterwards.
 pub struct Scan {
     min: [i32; 3],
     side: usize,
     cells: Vec<Option<Rc<Cell>>>,
     next_layer: usize,
-    centre: [f64; 3],
+    /// Layers whose faces have been made (they need the layer above them).
+    built_layers: usize,
     radius_blocks: u32,
+    map: Mapping,
+    link_centre: [f32; 3],
+    nearest: Nearest,
 }
 
 /// A finished snapshot, in link space.
@@ -81,8 +92,13 @@ pub struct Snapshot {
 
 impl Scan {
     /// A scan of the blocks within `radius` blocks (a cube `2 * radius + 1` wide) of the block that
-    /// holds `centre` (the player's position, in blocks).
-    pub fn new(centre: [f64; 3], radius: u32) -> Self {
+    /// holds `centre` (the player's position, in blocks), cut to the contract's limit.
+    pub fn new(centre: [f64; 3], radius: u32, map: Mapping) -> Self {
+        Self::with_limit(centre, radius, map, MAX_SNAPSHOT_TRIANGLES)
+    }
+
+    /// The same with another limit on the triangles kept.
+    pub fn with_limit(centre: [f64; 3], radius: u32, map: Mapping, limit: usize) -> Self {
         let c = [
             centre[0].floor() as i32,
             centre[1].floor() as i32,
@@ -95,8 +111,11 @@ impl Scan {
             side,
             cells: vec![None; side * side * side],
             next_layer: 0,
-            centre,
+            built_layers: 0,
             radius_blocks: radius,
+            map,
+            link_centre: map.position(centre),
+            nearest: Nearest::new(limit),
         }
     }
 
@@ -108,7 +127,8 @@ impl Scan {
         self.next_layer >= self.side
     }
 
-    /// Reads up to `layers` more horizontal layers from the source, lowest first.
+    /// Reads up to `layers` more horizontal layers from the source, lowest first, and makes the triangles of
+    /// every layer whose neighbours are now known.
     pub fn advance(&mut self, src: &mut dyn BlockSource, layers: usize) {
         for _ in 0..layers {
             if self.is_done() {
@@ -127,6 +147,16 @@ impl Scan {
                 }
             }
             self.next_layer += 1;
+            // the layer below this one has both its neighbours now
+            while self.built_layers + 1 < self.next_layer {
+                self.build_layer(self.built_layers);
+                self.built_layers += 1;
+            }
+        }
+        if self.is_done() && self.built_layers < self.side {
+            // the top layer has nothing above it in the scan
+            self.build_layer(self.built_layers);
+            self.built_layers += 1;
         }
     }
 
@@ -144,75 +174,145 @@ impl Scan {
             .is_some_and(|c| c.full)
     }
 
-    /// The triangles of a finished scan, mapped to link space and cut to the size limit.
-    pub fn build(&self, map: &Mapping) -> Snapshot {
-        self.build_with_limit(map, MAX_SNAPSHOT_TRIANGLES)
-    }
-
-    pub fn build_with_limit(&self, map: &Mapping, limit: usize) -> Snapshot {
-        let mut tris: Vec<[[f64; 3]; 3]> = Vec::new();
-        for ly in 0..self.side {
-            for lz in 0..self.side {
-                for lx in 0..self.side {
-                    let Some(cell) = &self.cells[self.index(lx, ly, lz)] else {
-                        continue;
-                    };
-                    let origin = [
-                        f64::from(self.min[0]) + lx as f64,
-                        f64::from(self.min[1]) + ly as f64,
-                        f64::from(self.min[2]) + lz as f64,
-                    ];
-                    for b in &cell.boxes {
-                        for (axis, max_side) in FACES {
-                            if on_boundary(b, axis, max_side) {
-                                let mut d = [0i64; 3];
-                                d[axis] = if max_side { 1 } else { -1 };
-                                if self.full_at(
-                                    lx as i64 + d[0],
-                                    ly as i64 + d[1],
-                                    lz as i64 + d[2],
-                                ) {
-                                    continue;
-                                }
+    /// The faces of one layer, in scan order (z, then x, then box, then face).
+    fn build_layer(&mut self, ly: usize) {
+        let mut face = Vec::with_capacity(2);
+        for lz in 0..self.side {
+            for lx in 0..self.side {
+                let Some(cell) = self.cells[self.index(lx, ly, lz)].clone() else {
+                    continue;
+                };
+                let origin = [
+                    f64::from(self.min[0]) + lx as f64,
+                    f64::from(self.min[1]) + ly as f64,
+                    f64::from(self.min[2]) + lz as f64,
+                ];
+                for b in &cell.boxes {
+                    for (axis, max_side) in FACES {
+                        if on_boundary(b, axis, max_side) {
+                            let mut d = [0i64; 3];
+                            d[axis] = if max_side { 1 } else { -1 };
+                            if self.full_at(lx as i64 + d[0], ly as i64 + d[1], lz as i64 + d[2]) {
+                                continue;
                             }
-                            push_face(&mut tris, origin, b, axis, max_side);
+                        }
+                        face.clear();
+                        push_face(&mut face, origin, b, axis, max_side);
+                        for t in face.drain(..) {
+                            let t = self.map.triangle(t);
+                            self.nearest
+                                .offer(distance_to_bounds(self.link_centre, &t), t);
                         }
                     }
                 }
             }
         }
-        let centre = map.position(self.centre);
-        let radius = (f64::from(self.radius_blocks) * map.scale) as f32;
-        let mut mapped: Vec<Tri> = tris.into_iter().map(|t| map.triangle(t)).collect();
-        let total = mapped.len();
-        if total <= limit {
-            return Snapshot {
-                centre,
-                radius,
-                triangles: mapped,
-                dropped: 0,
-                total,
-            };
-        }
-        let mut keyed: Vec<(f32, usize)> = mapped
-            .iter()
-            .enumerate()
-            .map(|(i, t)| (distance_to_bounds(centre, t), i))
-            .collect();
-        // Stable, so ties keep scan order.
-        keyed.sort_by(|a, b| a.0.total_cmp(&b.0));
-        let nearest_dropped = keyed[limit].0;
-        let mut keep: Vec<usize> = keyed[..limit].iter().map(|k| k.1).collect();
-        keep.sort_unstable();
-        let kept: Vec<Tri> = keep.into_iter().map(|i| mapped[i]).collect();
-        mapped.clear();
+    }
+
+    /// The snapshot of a finished scan, cut to the limit: the nearest triangles stay, in scan order, and the
+    /// radius becomes the distance of the nearest one dropped.
+    pub fn finish(self) -> Snapshot {
+        let radius = (f64::from(self.radius_blocks) * self.map.scale) as f32;
+        let (triangles, total, nearest_dropped) = self.nearest.into_parts();
         Snapshot {
-            centre,
+            centre: self.link_centre,
             radius: radius.min(nearest_dropped),
-            triangles: kept,
-            dropped: total - limit,
+            dropped: total - triangles.len(),
+            triangles,
             total,
         }
+    }
+}
+
+/// One triangle offered to [`Nearest`]: its distance from the centre and its place in scan order.
+struct Entry {
+    distance: f32,
+    seq: usize,
+    tri: Tri,
+}
+
+impl PartialEq for Entry {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other).is_eq()
+    }
+}
+
+impl Eq for Entry {}
+
+impl PartialOrd for Entry {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+/// Nearer first; among equally near ones, earlier in scan order first.
+impl Ord for Entry {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.distance
+            .total_cmp(&other.distance)
+            .then(self.seq.cmp(&other.seq))
+    }
+}
+
+/// The `limit` nearest triangles of those offered so far, never more in memory. Below the limit they are a
+/// plain list in scan order; past it, a max-heap whose top is the farthest kept one, which a nearer newcomer
+/// replaces at a cost of `log(limit)`.
+struct Nearest {
+    limit: usize,
+    offered: usize,
+    list: Vec<Entry>,
+    heap: Option<BinaryHeap<Entry>>,
+    nearest_dropped: f32,
+}
+
+impl Nearest {
+    fn new(limit: usize) -> Self {
+        Self {
+            limit,
+            offered: 0,
+            list: Vec::new(),
+            heap: None,
+            nearest_dropped: f32::INFINITY,
+        }
+    }
+
+    fn offer(&mut self, distance: f32, tri: Tri) {
+        let e = Entry {
+            distance,
+            seq: self.offered,
+            tri,
+        };
+        self.offered += 1;
+        if self.heap.is_none() {
+            if self.list.len() < self.limit {
+                self.list.push(e);
+                return;
+            }
+            self.heap = Some(BinaryHeap::from(std::mem::take(&mut self.list)));
+        }
+        let Some(heap) = self.heap.as_mut() else {
+            return;
+        };
+        let dropped = match heap.peek_mut() {
+            Some(mut top) if e < *top => std::mem::replace(&mut *top, e),
+            _ => e,
+        };
+        self.nearest_dropped = self.nearest_dropped.min(dropped.distance);
+    }
+
+    /// The kept triangles in scan order, how many were offered, and the distance of the nearest dropped one
+    /// (infinite when none was).
+    fn into_parts(self) -> (Vec<Tri>, usize, f32) {
+        let mut kept = match self.heap {
+            Some(h) => {
+                let mut v = h.into_vec();
+                v.sort_unstable_by_key(|e| e.seq);
+                v
+            }
+            None => self.list,
+        };
+        let tris = kept.drain(..).map(|e| e.tri).collect();
+        (tris, self.offered, self.nearest_dropped)
     }
 }
 
@@ -318,12 +418,22 @@ mod tests {
         }
     }
 
-    fn scan(grid: &mut Grid, centre: [f64; 3], r: u32) -> Scan {
-        let mut s = Scan::new(centre, r);
+    fn snapshot_with_limit(
+        grid: &mut Grid,
+        centre: [f64; 3],
+        r: u32,
+        map: &Mapping,
+        limit: usize,
+    ) -> Snapshot {
+        let mut s = Scan::with_limit(centre, r, *map, limit);
         let n = s.layers();
         s.advance(grid, n);
         assert!(s.is_done());
-        s
+        s.finish()
+    }
+
+    fn snapshot(grid: &mut Grid, centre: [f64; 3], r: u32, map: &Mapping) -> Snapshot {
+        snapshot_with_limit(grid, centre, r, map, MAX_SNAPSHOT_TRIANGLES)
     }
 
     fn normal(t: &Tri) -> [f32; 3] {
@@ -342,7 +452,7 @@ mod tests {
     #[test]
     fn a_lone_cube_has_twelve_triangles_all_facing_outward() {
         let mut g = Grid([((0, 0, 0), Cell::cube())].into());
-        let snap = scan(&mut g, [0.5, 0.5, 0.5], 1).build(&Mapping::default());
+        let snap = snapshot(&mut g, [0.5, 0.5, 0.5], 1, &Mapping::default());
         assert_eq!(snap.triangles.len(), 12);
         let centre = [0.5f32; 3];
         for t in &snap.triangles {
@@ -360,7 +470,7 @@ mod tests {
     #[test]
     fn each_face_normal_is_the_axis_it_lies_on() {
         let mut g = Grid([((0, 0, 0), Cell::cube())].into());
-        let snap = scan(&mut g, [0.5, 0.5, 0.5], 1).build(&Mapping::default());
+        let snap = snapshot(&mut g, [0.5, 0.5, 0.5], 1, &Mapping::default());
         let mut seen = [[false; 2]; 3];
         for t in &snap.triangles {
             let n = normal(t);
@@ -376,7 +486,7 @@ mod tests {
     #[test]
     fn touching_full_blocks_hide_their_shared_faces() {
         let mut g = Grid([((0, 0, 0), Cell::cube()), ((1, 0, 0), Cell::cube())].into());
-        let snap = scan(&mut g, [0.5, 0.5, 0.5], 2).build(&Mapping::default());
+        let snap = snapshot(&mut g, [0.5, 0.5, 0.5], 2, &Mapping::default());
         // two cubes side by side: 10 faces remain, 20 triangles
         assert_eq!(snap.triangles.len(), 20);
     }
@@ -392,7 +502,7 @@ mod tests {
             }
         }
         let mut g = Grid(cells);
-        let snap = scan(&mut g, [0.5, 0.5, 0.5], 2).build(&Mapping::default());
+        let snap = snapshot(&mut g, [0.5, 0.5, 0.5], 2, &Mapping::default());
         // top: 25 faces; the four sides of the 5x5x2 slab: 4 * 5 * 2 faces; the bottom is outside the scan
         // (y = -3 is out of the cube, so those 25 faces count too because nothing is known behind them)
         assert_eq!(snap.triangles.len(), 2 * (25 + 40 + 25));
@@ -405,7 +515,7 @@ mod tests {
             boxes: vec![[0.0, 0.0, 0.0, 1.0, 0.5, 1.0]],
         });
         let mut g = Grid([((0, 0, 0), slab)].into());
-        let snap = scan(&mut g, [0.5, 0.5, 0.5], 1).build(&Mapping::default());
+        let snap = snapshot(&mut g, [0.5, 0.5, 0.5], 1, &Mapping::default());
         assert_eq!(snap.triangles.len(), 12);
         assert!(snap.triangles.iter().flatten().all(|v| v[1] <= 0.5 + 1e-6));
         assert!(
@@ -424,7 +534,7 @@ mod tests {
             boxes: vec![[0.0, 0.0, 0.0, 1.0, 0.5, 1.0]],
         });
         let mut g = Grid([((0, 0, 0), slab), ((0, 1, 0), Cell::cube())].into());
-        let snap = scan(&mut g, [0.5, 0.5, 0.5], 2).build(&Mapping::default());
+        let snap = snapshot(&mut g, [0.5, 0.5, 0.5], 2, &Mapping::default());
         let top_faces = snap
             .triangles
             .iter()
@@ -436,13 +546,13 @@ mod tests {
     #[test]
     fn the_scan_can_be_read_in_slices() {
         let mut g = Grid([((0, 0, 0), Cell::cube())].into());
-        let mut s = Scan::new([0.5, 0.5, 0.5], 1);
+        let mut s = Scan::new([0.5, 0.5, 0.5], 1, Mapping::default());
         s.advance(&mut g, 1);
         assert!(!s.is_done());
         s.advance(&mut g, 1);
         s.advance(&mut g, 5);
         assert!(s.is_done());
-        assert_eq!(s.build(&Mapping::default()).triangles.len(), 12);
+        assert_eq!(s.finish().triangles.len(), 12);
     }
 
     #[test]
@@ -453,9 +563,9 @@ mod tests {
                 None
             }
         }
-        let mut s = Scan::new([0.0, 0.0, 0.0], 1);
+        let mut s = Scan::new([0.0, 0.0, 0.0], 1, Mapping::default());
         s.advance(&mut None_, 3);
-        assert!(s.build(&Mapping::default()).triangles.is_empty());
+        assert!(s.finish().triangles.is_empty());
     }
 
     #[test]
@@ -465,7 +575,7 @@ mod tests {
             flip_x: true,
             ..Mapping::default()
         };
-        let snap = scan(&mut g, [0.5, 0.5, 0.5], 1).build(&map);
+        let snap = snapshot(&mut g, [0.5, 0.5, 0.5], 1, &map);
         let centre = map.position([0.5, 0.5, 0.5]);
         for t in &snap.triangles {
             let n = normal(t);
@@ -486,7 +596,7 @@ mod tests {
             offset: [0.0, -4.0, 0.0],
             ..Mapping::default()
         };
-        let snap = scan(&mut g, [0.5, 0.5, 0.5], 1).build(&map);
+        let snap = snapshot(&mut g, [0.5, 0.5, 0.5], 1, &map);
         assert_eq!(snap.centre, [1.0, -3.0, 1.0]);
         assert_eq!(snap.radius, 2.0);
         let ys: Vec<f32> = snap.triangles.iter().flatten().map(|v| v[1]).collect();
@@ -505,10 +615,10 @@ mod tests {
             .map(|((x, y, z), c)| ((x * 2, y, z), c))
             .collect();
         let mut g = Grid(cells);
-        let s = scan(&mut g, [0.5, 0.5, 0.5], 9);
-        let full = s.build(&Mapping::default());
+        let map = Mapping::default();
+        let full = snapshot(&mut g, [0.5, 0.5, 0.5], 9, &map);
         assert_eq!(full.total, 60);
-        let cut = s.build_with_limit(&Mapping::default(), 24);
+        let cut = snapshot_with_limit(&mut g, [0.5, 0.5, 0.5], 9, &map, 24);
         assert_eq!(cut.triangles.len(), 24);
         assert_eq!(cut.dropped, 36);
         assert_eq!(cut.total, 60);
@@ -526,7 +636,49 @@ mod tests {
         );
         assert!(cut.radius < 9.0);
         // the same world gives the same cut
-        assert_eq!(cut, s.build_with_limit(&Mapping::default(), 24));
+        assert_eq!(
+            cut,
+            snapshot_with_limit(&mut g, [0.5, 0.5, 0.5], 9, &map, 24)
+        );
+    }
+
+    #[test]
+    fn the_cut_keeps_exactly_what_sorting_every_triangle_would_keep() {
+        // a checkerboard: nearly every face is exposed, and many triangles lie at the same distance
+        let mut cells = HashMap::new();
+        for x in -4..=4 {
+            for y in -4..=4 {
+                for z in -4..=4 {
+                    if (x + y + z) % 2 == 0 {
+                        cells.insert((x, y, z), Cell::cube());
+                    }
+                }
+            }
+        }
+        let mut g = Grid(cells);
+        let map = Mapping::default();
+        let full = snapshot(&mut g, [0.3, 0.6, 0.2], 4, &map);
+        for limit in [0, 1, 100, 777, full.total - 1, full.total] {
+            let cut = snapshot_with_limit(&mut g, [0.3, 0.6, 0.2], 4, &map, limit);
+            // the reference: every triangle, a stable sort by distance, the first `limit`, back in scan order
+            let mut keyed: Vec<(f32, usize)> = full
+                .triangles
+                .iter()
+                .enumerate()
+                .map(|(i, t)| (distance_to_bounds(full.centre, t), i))
+                .collect();
+            keyed.sort_by(|a, b| a.0.total_cmp(&b.0));
+            let mut keep: Vec<usize> = keyed[..limit].iter().map(|k| k.1).collect();
+            keep.sort_unstable();
+            let want: Vec<Tri> = keep.into_iter().map(|i| full.triangles[i]).collect();
+            assert_eq!(cut.triangles, want, "limit {limit}");
+            assert_eq!(cut.total, full.total);
+            assert_eq!(cut.dropped, full.total - limit);
+            let radius = keyed
+                .get(limit)
+                .map_or(full.radius, |k| full.radius.min(k.0));
+            assert_eq!(cut.radius, radius, "limit {limit}");
+        }
     }
 
     #[test]
@@ -537,11 +689,11 @@ mod tests {
     #[test]
     fn the_fingerprint_changes_with_the_content() {
         let mut g = Grid([((0, 0, 0), Cell::cube())].into());
-        let a = scan(&mut g, [0.5, 0.5, 0.5], 1).build(&Mapping::default());
-        let b = scan(&mut g, [0.5, 0.5, 0.5], 1).build(&Mapping::default());
+        let a = snapshot(&mut g, [0.5, 0.5, 0.5], 1, &Mapping::default());
+        let b = snapshot(&mut g, [0.5, 0.5, 0.5], 1, &Mapping::default());
         assert_eq!(fingerprint(&a), fingerprint(&b));
         g.0.insert((1, 0, 0), Cell::cube());
-        let c = scan(&mut g, [0.5, 0.5, 0.5], 1).build(&Mapping::default());
+        let c = snapshot(&mut g, [0.5, 0.5, 0.5], 1, &Mapping::default());
         assert_ne!(fingerprint(&a), fingerprint(&c));
     }
 }

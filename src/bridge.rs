@@ -468,7 +468,11 @@ impl Bridge {
             if !(due || moved) {
                 return;
             }
-            c.scan = Some(Scan::new(centre.pos, self.cfg.collision_radius));
+            c.scan = Some(Scan::new(
+                centre.pos,
+                self.cfg.collision_radius,
+                self.cfg.mapping,
+            ));
             c.scan_world = centre.world.clone();
             c.last_start = Some(t.now);
             c.last_centre = Some(centre.pos);
@@ -484,8 +488,10 @@ impl Bridge {
         if !scan.is_done() {
             return;
         }
-        let snap = scan.build(&self.cfg.mapping);
-        c.scan = None;
+        let Some(scan) = c.scan.take() else {
+            return;
+        };
+        let snap = scan.finish();
         let hash = fingerprint(&snap);
         let stale = c
             .last_sent
