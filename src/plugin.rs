@@ -256,6 +256,10 @@ impl DisplaySink {
         if w.world.is_none() {
             w.world = server.get_all_worlds().into_iter().next();
         }
+        if w.worlds.is_empty() {
+            // a session lost before the first sweep clears with this list
+            w.worlds = server.get_all_worlds();
+        }
         self.ticks += 1;
         if self.ticks < if running { 20 } else { 40 } {
             return;
@@ -393,11 +397,13 @@ impl CommandHandler for Stop {
     fn handle(
         &self,
         sender: CommandSender,
-        _s: Server,
+        server: Server,
         _a: ConsumedArgs,
     ) -> Result<i32, CommandError> {
         with_state(|st| {
             let State { bridge, guests, .. } = st;
+            // the clear sweeps every world as it is now, not as the last periodic sweep saw it
+            guests.inner.world().worlds = server.get_all_worlds();
             bridge.stop(guests);
         })?;
         say(&sender, "link stopped");
@@ -473,10 +479,14 @@ impl Plugin for PumpkinLink {
         let role = cfg.role;
         let block_state = resolve_block(&cfg.guest_block);
         let guests = DisplaySink::new(block_state);
+        let mut cfg = cfg;
         if cfg.show_guests && block_state.is_none() {
             tracing::warn!(
                 "pumpkin-link: guest_block names no block of this server; guests are not shown"
             );
+            // Said once here; otherwise every spawn would wait for a block that never comes and be retried, and
+            // warned about, at each sweep.
+            cfg.show_guests = false;
         }
         let mut bridge = match config_error {
             None => Bridge::new(cfg, endpoint),
