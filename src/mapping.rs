@@ -91,9 +91,12 @@ impl Mapping {
     /// The rotation of an entity looking along `yaw`/`pitch` (degrees), as a unit quaternion
     /// `x, y, z, w` in link space.
     pub fn rotation(&self, yaw_deg: f32, pitch_deg: f32) -> [f32; 4] {
-        let d = view_direction(f64::from(yaw_deg), f64::from(pitch_deg));
-        let (yaw, pitch) = direction_to_yaw_pitch(self.flip(d));
-        yaw_pitch_to_quat(yaw, pitch)
+        // The yaw is mirrored on its own, from the horizontal direction it names: through the view direction a
+        // player looking straight up or down would have no horizontal direction and lose the yaw. A mirror in X
+        // or Z leaves the pitch as it is.
+        let d = view_direction(f64::from(yaw_deg), 0.0);
+        let (yaw, _) = direction_to_yaw_pitch(self.flip(d));
+        yaw_pitch_to_quat(yaw, f64::from(pitch_deg).clamp(-90.0, 90.0))
     }
 
     /// The `yaw`, `pitch` (degrees) of a link rotation, in Minecraft's naming; the inverse of
@@ -202,6 +205,21 @@ pub fn rotate_z(q: [f32; 4]) -> [f64; 3] {
 mod tests {
     use super::*;
 
+    /// The quaternion's local +Y axis (the entity's up) in the parent space.
+    fn rotate_y(q: [f32; 4]) -> [f64; 3] {
+        let (x, y, z, w) = (
+            f64::from(q[0]),
+            f64::from(q[1]),
+            f64::from(q[2]),
+            f64::from(q[3]),
+        );
+        [
+            2.0 * (x * y - w * z),
+            1.0 - 2.0 * (x * x + z * z),
+            2.0 * (y * z + w * x),
+        ]
+    }
+
     fn close(a: [f64; 3], b: [f64; 3]) {
         for i in 0..3 {
             assert!((a[i] - b[i]).abs() < 1e-5, "{a:?} != {b:?}");
@@ -254,6 +272,27 @@ mod tests {
         let m = Mapping::default();
         close(rotate_z(m.rotation(0.0, 90.0)), [0.0, -1.0, 0.0]);
         close(rotate_z(m.rotation(0.0, -90.0)), [0.0, 1.0, 0.0]);
+    }
+
+    #[test]
+    fn looking_straight_up_or_down_keeps_the_yaw() {
+        for map in [
+            Mapping::default(),
+            Mapping {
+                flip_x: true,
+                ..Mapping::default()
+            },
+        ] {
+            for pitch in [90.0f32, -90.0] {
+                let level = map.rotation(90.0, 0.0);
+                let vertical = map.rotation(90.0, pitch);
+                // the entity's up (+Y) tilts towards where it faced: its horizontal part is the level front
+                let up = rotate_y(vertical);
+                let front = rotate_z(level);
+                let sign = if pitch > 0.0 { 1.0 } else { -1.0 };
+                close([up[0] * sign, 0.0, up[2] * sign], [front[0], 0.0, front[2]]);
+            }
+        }
     }
 
     #[test]
