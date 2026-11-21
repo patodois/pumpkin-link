@@ -4,6 +4,10 @@ on:
   push:
   pull_request:
 
+# The jobs only read the repository.
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
 
@@ -13,10 +17,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable (2026-11-05)
         with:
           components: clippy, rustfmt
           targets: wasm32-wasip2
@@ -30,15 +34,15 @@ jobs:
           cargo fmt --all -- --check
           cargo fmt --manifest-path tools/sandbox-host/Cargo.toml -- --check
       - name: "clippy (native: the protocol, mapping, collision, config; tests and examples)"
-        run: cargo clippy --all-targets --no-default-features -- -D warnings
+        run: cargo clippy --locked --all-targets --no-default-features -- -D warnings
       - name: "clippy (wasm32-wasip2: the plugin glue)"
-        run: cargo clippy --target wasm32-wasip2 --lib -- -D warnings
+        run: cargo clippy --locked --target wasm32-wasip2 --lib -- -D warnings
       - name: clippy (sandbox host)
-        run: cargo clippy --manifest-path tools/sandbox-host/Cargo.toml -- -D warnings
+        run: cargo clippy --locked --manifest-path tools/sandbox-host/Cargo.toml -- -D warnings
       - name: unit and end-to-end tests
-        run: cargo test --no-default-features
+        run: cargo test --locked --no-default-features
       - name: build the plugin
-        run: cargo build --release --target wasm32-wasip2
+        run: cargo build --locked --release --target wasm32-wasip2
       - name: the plugin is a component with the v0.1 plugin ABI
         run: |
           python3 - <<'PY'
@@ -47,11 +51,17 @@ jobs:
           assert b"pumpkin:plugin/metadata@0.1.0" in data, "no metadata export"
           print("component,", len(data), "bytes")
           PY
+      - name: the public-tree gate's own tests
+        run: python3 tools/test_public_tree.py
       - name: public-tree gate
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref }}
         run: |
           python3 tools/check_public_tree.py
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
-            python3 tools/check_public_tree.py --range "origin/${{ github.base_ref }}..HEAD"
+          python3 tools/check_public_tree.py --history
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            python3 tools/check_public_tree.py --range "origin/$BASE_REF..HEAD"
           elif git rev-parse --verify --quiet origin/main >/dev/null && [ "$(git rev-parse HEAD)" != "$(git rev-parse origin/main)" ]; then
             python3 tools/check_public_tree.py --range origin/main..HEAD
           fi
@@ -61,13 +71,14 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.97.0
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable (2026-11-05)
         with:
+          toolchain: 1.97.0
           targets: wasm32-wasip2
       - uses: Swatinem/rust-cache@v2
-      - run: cargo build --release --target wasm32-wasip2
-      - run: cargo test --no-default-features
+      - run: cargo build --locked --release --target wasm32-wasip2
+      - run: cargo test --locked --no-default-features
 
   wasm-tests:
     name: protocol tests on wasm32-wasip2 under wasmtime
@@ -78,8 +89,8 @@ jobs:
       WASMTIME_VERSION: 50.0.1
       WASMTIME_SHA256: 685466455dd42a14774a86c36c8f2e45cbb9bd6d92a850139315df60a75498a5
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable (2026-11-05)
         with:
           targets: wasm32-wasip2
       - uses: Swatinem/rust-cache@v2
@@ -98,7 +109,7 @@ jobs:
           CARGO_TARGET_WASM32_WASIP2_RUNNER: "timeout 300 wasmtime run -C cache=n -S inherit-network"
         run: |
           for t in peer_frames bridge_ticks session_protocol; do
-            cargo test --target wasm32-wasip2 --no-default-features --test "$t"
+            cargo test --locked --target wasm32-wasip2 --no-default-features --test "$t"
           done
 
   sandbox:
@@ -106,8 +117,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable (2026-11-05)
         with:
           targets: wasm32-wasip2
       - uses: Swatinem/rust-cache@v2
