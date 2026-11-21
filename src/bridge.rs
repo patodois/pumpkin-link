@@ -58,14 +58,14 @@ pub fn clean_peer_text(s: &str) -> String {
     out
 }
 
-/// Where the endpoint file cannot be created owner-only. The library creates it with mode 0600 from the moment it
+/// Where the endpoint file cannot be created readable by its user alone. The library creates it with mode 0600 from the moment it
 /// exists on Unix; a WebAssembly component on WASI cannot ask for a mode, so there the file gets what the server
 /// process's umask leaves (CONTRACT section 6.2, implementation note under "Writing").
 pub const ENDPOINT_MODE_FROM_UMASK: bool = cfg!(target_os = "wasi");
 
 /// What `/link status` and the server log say while a host with a token runs where the endpoint file's mode is
 /// the umask's.
-pub const ENDPOINT_MODE_WARNING: &str = "endpoint file: a plugin cannot create it owner-only, so its mode is what \
+pub const ENDPOINT_MODE_WARNING: &str = "endpoint file: a plugin cannot create it with mode 0600, so its mode is what \
      the server's umask leaves; start the server with umask 077, or other users can read the token and a native \
      guest refuses the file";
 
@@ -649,7 +649,7 @@ impl Bridge {
         out
     }
 
-    /// A host with a token that runs where the endpoint file cannot be created owner-only: the warning to log and
+    /// A host with a token that runs where the endpoint file cannot be created with mode 0600: the warning to log and
     /// show (see [`ENDPOINT_MODE_FROM_UMASK`]).
     pub fn endpoint_mode_warning(&self) -> Option<&'static str> {
         endpoint_mode_warning(

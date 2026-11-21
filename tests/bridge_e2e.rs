@@ -304,7 +304,7 @@ fn token_auth_writes_the_endpoint_after_binding_and_a_guest_with_the_file_connec
     let e = link::Endpoint::parse(&std::fs::read(&ep).unwrap()).unwrap();
     assert_eq!(e.control_port, b.control_port().unwrap());
     assert_eq!(e.token.len(), 64);
-    // natively the file is owner-only (on WASI its mode is the umask's, which the status then says)
+    // natively the file has mode 0600 (on WASI its mode is the umask's, which the status then says)
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
