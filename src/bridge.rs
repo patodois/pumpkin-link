@@ -58,6 +58,25 @@ pub fn clean_peer_text(s: &str) -> String {
     out
 }
 
+/// Where the endpoint file cannot be created owner-only. The library creates it with mode 0600 from the moment it
+/// exists on Unix; a WebAssembly component on WASI cannot ask for a mode, so there the file gets what the server
+/// process's umask leaves (CONTRACT section 6.2, implementation note under "Writing").
+pub const ENDPOINT_MODE_FROM_UMASK: bool = cfg!(target_os = "wasi");
+
+/// What `/link status` and the server log say while a host with a token runs where the endpoint file's mode is
+/// the umask's.
+pub const ENDPOINT_MODE_WARNING: &str = "endpoint file: a plugin cannot create it owner-only, so its mode is what \
+     the server's umask leaves; start the server with umask 077, or other users can read the token and a native \
+     guest refuses the file";
+
+fn endpoint_mode_warning(
+    token_active: bool,
+    role: Role,
+    mode_from_umask: bool,
+) -> Option<&'static str> {
+    (token_active && role == Role::Host && mode_from_umask).then_some(ENDPOINT_MODE_WARNING)
+}
+
 /// One online player, as the server reports it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PlayerSample {
@@ -513,6 +532,7 @@ impl Bridge {
         };
         // A guest has no control listener (`control_addr` is port 0): it connects to the host's port, from
         // the endpoint file when the token is on, else from the config.
+        let mut warning = None;
         let mut head = match self.role {
             Role::Host => {
                 let port = link.control_addr().map_or(0, |a| a.port());
@@ -525,6 +545,9 @@ impl Bridge {
         };
         if self.token_active {
             head.push_str(", token auth on");
+            if let Some(w) = self.endpoint_mode_warning() {
+                warning = Some(w);
+            }
             if self.counters.refused_unauthorized > 0 {
                 head.push_str(&format!(
                     ", {} refused as unauthorized",
@@ -533,6 +556,7 @@ impl Bridge {
             }
         }
         out.push(head);
+        out.extend(warning.map(str::to_owned));
         match link.peer() {
             Some(p) if link.is_connected() => {
                 out.push(format!(
@@ -606,6 +630,16 @@ impl Bridge {
             out.push(format!("problem: {p}"));
         }
         out
+    }
+
+    /// A host with a token that runs where the endpoint file cannot be created owner-only: the warning to log and
+    /// show (see [`ENDPOINT_MODE_FROM_UMASK`]).
+    pub fn endpoint_mode_warning(&self) -> Option<&'static str> {
+        endpoint_mode_warning(
+            self.is_running() && self.token_active,
+            self.role,
+            ENDPOINT_MODE_FROM_UMASK,
+        )
     }
 
     /// Host: gives the input focus to the guest or takes it back.
@@ -762,6 +796,17 @@ mod tests {
             clean_peer_text("Minecraft (Pumpkin server)"),
             "Minecraft (Pumpkin server)"
         );
+    }
+
+    #[test]
+    fn the_umask_warning_is_for_a_host_with_a_token_where_the_mode_cannot_be_set() {
+        assert_eq!(
+            endpoint_mode_warning(true, Role::Host, true),
+            Some(ENDPOINT_MODE_WARNING)
+        );
+        assert_eq!(endpoint_mode_warning(false, Role::Host, true), None);
+        assert_eq!(endpoint_mode_warning(true, Role::Guest, true), None);
+        assert_eq!(endpoint_mode_warning(true, Role::Host, false), None);
     }
 
     #[test]

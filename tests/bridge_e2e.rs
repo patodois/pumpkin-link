@@ -306,6 +306,17 @@ fn token_auth_writes_the_endpoint_after_binding_and_a_guest_with_the_file_connec
     let e = link::Endpoint::parse(&std::fs::read(&ep).unwrap()).unwrap();
     assert_eq!(e.control_port, b.control_port().unwrap());
     assert_eq!(e.token.len(), 64);
+    // natively the file is owner-only (on WASI its mode is the umask's, which the status then says)
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&ep).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "{mode:o}");
+    }
+    assert_eq!(
+        b.endpoint_mode_warning().is_some(),
+        pumpkin_link::bridge::ENDPOINT_MODE_FROM_UMASK
+    );
     let mut lc = guest_cfg(1);
     lc.endpoint_file = Some(ep.clone());
     let mut peer = Link::guest(lc).unwrap();

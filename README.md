@@ -167,7 +167,9 @@ usual umask 022, 0600 under 077 (measured under wasmtime). Under 022 other users
 guest. The plugin cannot read the mode back either. Start the server with `umask 077`: that makes the file 0600
 and lets both a native guest and the plugin use it. Keeping the data folder to yourself (mode 0700) keeps other users
 away from the token, but under umask 022 the file in it is still 0644 and a native guest still refuses it. On
-Windows there is no umask; the folder's ACL is what counts.
+Windows there is no umask; the folder's ACL is what counts. Each time a host starts with `token_auth`, the plugin
+says this in the server log and to whoever typed `/link host`, and `/link status` repeats it while the host runs.
+(Built natively, as the tests run it, the file is created with mode 0600 from the moment it exists.)
 
 ## Permissions it asks for, and why
 

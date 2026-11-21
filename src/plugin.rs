@@ -381,6 +381,10 @@ impl CommandHandler for Start {
                 if role == Role::Host { "host" } else { "guest" }
             ),
         );
+        if let Some(w) = with_state(|st| st.bridge.endpoint_mode_warning())? {
+            tracing::warn!("pumpkin-link: {w}");
+            say(&sender, w);
+        }
         Ok(1)
     }
 }
@@ -480,7 +484,12 @@ impl Plugin for PumpkinLink {
         };
         if auto {
             match bridge.start(role) {
-                Ok(()) => tracing::info!("pumpkin-link: started as {role:?}"),
+                Ok(()) => {
+                    tracing::info!("pumpkin-link: started as {role:?}");
+                    if let Some(w) = bridge.endpoint_mode_warning() {
+                        tracing::warn!("pumpkin-link: {w}");
+                    }
+                }
                 Err(e) => tracing::error!("pumpkin-link: {e}"),
             }
         }
