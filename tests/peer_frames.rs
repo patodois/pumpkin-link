@@ -96,20 +96,21 @@ fn frame_channels_frames_and_cameras_are_counted_and_nothing_else_happens() {
     )));
     peer.datagram(&frame(1));
     peer.datagram(&frame(2));
-    // a frame that is stale, as the library counts them, is not counted by the bridge
+    // an older frame: since contract revision 7 the library hands every `Frame` on and leaves staleness to
+    // whoever reads the pixel file, so the bridge counts it like the others
     peer.datagram(&frame(1));
 
     let end = Instant::now() + Duration::from_secs(5);
-    while Instant::now() < end && b.counters.frames_ignored < 6 {
+    while Instant::now() < end && b.counters.frames_ignored < 7 {
         tick(&mut b);
     }
-    // four channels and two frames; one camera; the session is intact
-    assert_eq!(b.counters.frames_ignored, 6, "{:?}", b.counters);
+    // four channels and three frames; one camera; the session is intact
+    assert_eq!(b.counters.frames_ignored, 7, "{:?}", b.counters);
     assert_eq!(b.counters.cameras_ignored, 1);
     assert!(b.is_connected(), "{:?}", b.status());
     let status = b.status().join("\n");
     assert!(
-        status.contains("1 cameras and 6 frame messages ignored"),
+        status.contains("1 cameras and 7 frame messages ignored"),
         "{status}"
     );
     b.stop(&mut NoGuests);

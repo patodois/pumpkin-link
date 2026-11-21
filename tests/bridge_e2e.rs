@@ -516,6 +516,51 @@ fn a_second_guest_gets_busy_and_the_first_session_survives() {
     cleanup(&ep);
 }
 
+/// CONTRACT section 2, "Before a session" (revision 8): a local process that connects and sends nothing does not
+/// hold the handshake. Under revision 6 the first connection took the host's only handshake place for its whole
+/// `timeout_ms`, and the real guest was answered `busy` meanwhile.
+#[test]
+fn a_silent_local_connection_does_not_keep_the_guest_out() {
+    let _serial = serial();
+    let ep = temp_path("silent");
+    // a long handshake timeout, so that a silent connection holding the place would outlast the test
+    let mut c = cfg();
+    c.timeout_ms = 10_000;
+    let mut b = Bridge::new(c, ep.clone());
+    b.start(Role::Host).unwrap();
+    let port = b.control_port().unwrap();
+    let silent = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+    // the host takes the silent connection in before the guest arrives
+    for _ in 0..5 {
+        idle_tick(&mut b);
+    }
+    let mut peer = Link::guest(guest_cfg(port)).unwrap();
+    let (mut sink, mut ev) = (Sink::default(), Vec::new());
+    let ok = pump(&mut b, &mut peer, &[], &mut sink, &mut ev, |b, e| {
+        b.is_connected() && e.iter().any(|x| matches!(x, Event::Connected(_)))
+    });
+    assert!(ok, "the guest did not get in: {ev:?}");
+    assert!(
+        !ev.iter()
+            .any(|e| matches!(e, Event::HandshakeFailed { reason } if reason.contains("busy"))),
+        "{ev:?}"
+    );
+    drop(silent);
+    b.stop(&mut sink);
+    cleanup(&ep);
+}
+
+fn idle_tick(b: &mut Bridge) {
+    let mut w = OneWorld(Floor);
+    b.tick(Tick {
+        now: Instant::now(),
+        players: &[],
+        worlds: &mut w,
+        guests: &mut Sink::default(),
+    });
+    std::thread::sleep(Duration::from_millis(5));
+}
+
 #[test]
 fn start_twice_and_a_taken_port_are_errors_that_leave_no_endpoint_file() {
     let _serial = serial();

@@ -454,7 +454,8 @@ fn datagrams_of_another_session_or_address_are_dropped_and_malformed_ones_counte
     r.session = good.wrapping_add(1);
     r.datagram(&Datagram::Pose(vec![pose(7, 1)]));
     r.session = good;
-    // another source address (a second socket)
+    // another source address (a second socket): from contract revision 8 the host's UDP socket is connected to
+    // the guest's, so the system drops this one before the link reads it, and it is not counted
     let other = UdpSocket::bind("127.0.0.1:0").unwrap();
     let h = Header {
         version: 1,
@@ -471,7 +472,7 @@ fn datagrams_of_another_session_or_address_are_dropped_and_malformed_ones_counte
     r.run(150);
     assert!(!r.events.iter().any(|e| matches!(e, Event::Poses { .. })));
     let s = r.host.stats();
-    assert!(s.foreign >= 2, "{s:?}");
+    assert!(s.foreign >= 1, "{s:?}");
     assert!(s.malformed >= 1, "{s:?}");
 }
 

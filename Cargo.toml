@@ -17,7 +17,8 @@ default = ["plugin"]
 plugin = ["dep:pumpkin-plugin-api", "dep:tracing"]
 
 [dependencies]
-rewrite-bridge = { version = "=0.3.1", features = ["link"] }
+# Contract v1 revision 8 is on rewrite-bridge's main branch only (no release yet), so the link is pinned to that commit.
+rewrite-bridge = { git = "https://github.com/patodois/rewrite-bridge", rev = "d03035b", features = ["link"] }
 serde_json = "1"
 pumpkin-plugin-api = { version = "=0.2.1", optional = true }
 tracing = { version = "0.1", optional = true }

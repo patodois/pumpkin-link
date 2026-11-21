@@ -38,7 +38,7 @@ pub struct Config {
     pub guest_asset: String,
     pub heartbeat_ms: u32,
     pub timeout_ms: u32,
-    /// The link token of contract revision 6.
+    /// The link token of CONTRACT section 6.2 (added in revision 6).
     pub token_auth: bool,
     /// token_auth: the name of the endpoint file in the plugin's data folder; "" means `endpoint.json`.
     /// A plugin sees no other folder (CONTRACT 6.2 leaves the place to the application).

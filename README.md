@@ -1,7 +1,7 @@
 # pumpkin-link
 
 A plugin for the [Pumpkin](https://github.com/Pumpkin-MC/Pumpkin) Minecraft server that speaks the
-rewrite-bridge passthrough link protocol (`docs/CONTRACT.md`, revision 6, with the optional token of
+rewrite-bridge passthrough link protocol (`docs/CONTRACT.md`, protocol v1 revision 8, with the optional token of
 section 6.2, in [rewrite-bridge](https://github.com/patodois/rewrite-bridge)). With it a server shares
 what a server holds, its players' poses and the collision of the blocks around a player, with another
 game or rewrite on the same machine, and shows that program's entities in the world.
@@ -204,8 +204,13 @@ threads, no memory-mapped files and no way to set a file's mode, so there:
   measured elsewhere);
 * the endpoint file gets the mode of the server's umask (see "Token" above).
 
-This needs a `rewrite-bridge` release that runs on that target; earlier ones panic when a host sees a guest's
-`hello` and cannot connect as a guest.
+This needs a `rewrite-bridge` that runs on that target (0.3.1 or later; 0.3.0 and earlier panic when a host sees a
+guest's `hello` and cannot connect as a guest). The plugin pins the `rewrite-bridge` commit that implements contract
+revision 8 (`d03035b`; no release carries it yet). What that revision gives a server: before a session a host holds up
+to four connections that have not sent their first line, so a local process that connects and stays silent cannot keep
+the real guest out; it accepts at most 8 connections per poll and closes at most 16 at a time; while a session is live
+its UDP socket is connected to the peer; error texts quote nothing from a refused line; and pose times of one entity
+never go back.
 
 ## License
 
