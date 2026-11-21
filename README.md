@@ -136,6 +136,8 @@ otherwise). That is what keeps a display from outliving its session:
 * an entity without our tag (a map maker's or another plugin's block displays) is never touched.
 
 Pumpkin only lists entities of loaded chunks, so a leftover in a chunk nobody has loaded is removed when the chunk loads.
+A display the sweep has not listed for two sweeps in a row is made again at the guest's next pose; if the new one is
+not listed either (the guest stays where no chunk is loaded), the wait doubles with each try, up to 64 sweeps.
 
 ## Collision
 

@@ -75,11 +75,22 @@ struct Shown<H> {
     last: Option<([f64; 3], f32, f32)>,
     /// Sweeps in a row that did not list the handle's entity: its chunk is unloaded, or it is gone.
     missed: u32,
+    /// Times in a row the display was made again and the world has not listed it since (the guest stays where
+    /// no chunk is loaded); each one doubles the misses before the next try.
+    remade: u32,
 }
 
 /// A display the world is not listing for this many sweeps in a row is taken as gone (one miss can be a
 /// sweep that ran before the world listed a display just spawned).
 const GONE_AFTER_MISSES: u32 = 2;
+
+/// The misses before a display is made again double with each try that the world did not list, up to
+/// `GONE_AFTER_MISSES << MAX_BACKOFF_DOUBLINGS` sweeps (64, about a minute while a link runs).
+const MAX_BACKOFF_DOUBLINGS: u32 = 5;
+
+fn misses_before_remaking(remade: u32) -> u32 {
+    GONE_AFTER_MISSES << remade.min(MAX_BACKOFF_DOUBLINGS)
+}
 
 pub struct Displays<W: DisplayWorld> {
     world: W,
@@ -135,6 +146,7 @@ impl<W: DisplayWorld> Displays<W> {
                         server_id,
                         last: None,
                         missed: 0,
+                        remade: 0,
                     },
                 );
                 true
@@ -162,7 +174,7 @@ impl<W: DisplayWorld> Displays<W> {
         let gone = self
             .shown
             .get(&guest)
-            .is_some_and(|s| s.missed >= GONE_AFTER_MISSES);
+            .is_some_and(|s| s.missed >= misses_before_remaking(s.remade));
         if gone && let Some((handle, server_id)) = self.create(guest) {
             // Its chunk has been unloaded since and nothing came back: show it again here, where the guest is
             // now. If the old chunk loads later, its copy is a duplicate of a live display and the sweep removes it.
@@ -171,6 +183,7 @@ impl<W: DisplayWorld> Displays<W> {
                 s.handle = handle;
                 s.server_id = server_id;
                 s.missed = 0;
+                s.remade += 1;
             }
         }
         if let Some(s) = self.shown.get_mut(&guest) {
@@ -215,6 +228,7 @@ impl<W: DisplayWorld> Displays<W> {
                     server_id,
                     last,
                     missed: 0,
+                    remade: 0,
                 },
             );
         }
@@ -251,6 +265,7 @@ impl<W: DisplayWorld> Displays<W> {
         for s in self.shown.values_mut() {
             if alive.contains(&s.server_id) {
                 s.missed = 0;
+                s.remade = 0;
             } else {
                 s.missed += 1;
             }
@@ -270,6 +285,10 @@ mod tests {
         next_id: u32,
         loaded: Vec<E>,
         disk: Vec<E>,
+        /// Displays made since the start.
+        created: usize,
+        /// New displays land where no chunk is loaded: the world never lists them.
+        create_unloaded: bool,
     }
 
     #[derive(Clone, Debug)]
@@ -312,11 +331,17 @@ mod tests {
         type Handle = u32;
         fn create(&mut self, tag: &Tag) -> Option<(u32, u32)> {
             self.next_id += 1;
-            self.loaded.push(E {
+            self.created += 1;
+            let e = E {
                 id: self.next_id,
                 tag: Some(tag.encode()),
                 pos: [0.0; 3],
-            });
+            };
+            if self.create_unloaded {
+                self.disk.push(e);
+            } else {
+                self.loaded.push(e);
+            }
             Some((self.next_id, self.next_id))
         }
         fn place(&mut self, h: &u32, pos: [f64; 3], _: f32, _: f32) {
@@ -587,6 +612,34 @@ mod tests {
         assert_eq!(d.world().loaded[0].pos, [1.0, 2.0, 3.0]);
         d.pose(90, [9.0, 9.0, 9.0], 0.0, 0.0);
         assert_eq!(d.world().loaded[0].pos, [9.0, 9.0, 9.0]);
+    }
+
+    #[test]
+    fn a_display_made_again_where_no_chunk_is_loaded_is_tried_less_and_less_often() {
+        let mut d = displays();
+        d.spawn(90);
+        d.pose(90, [5.0, 6.0, 7.0], 0.0, 0.0);
+        d.world().unload();
+        // the guest stays far from every player: whatever is made for it is never listed
+        d.world().create_unloaded = true;
+        let before = d.world().created;
+        for _ in 0..64 {
+            d.sweep();
+            d.pose(90, [1000.0, 64.0, 1000.0], 0.0, 0.0);
+        }
+        // made again after 2, then 4, 8, 16 and 32 more missed sweeps: 5 times in 64 sweeps, not 32
+        assert_eq!(d.world().created - before, 5);
+        // once the world lists it again, the wait is back to two sweeps
+        d.world().create_unloaded = false;
+        d.world().reload();
+        d.sweep();
+        assert!(d.is_shown(90));
+        let listed = d.world().created;
+        d.world().unload();
+        d.sweep();
+        d.sweep();
+        d.pose(90, [1.0, 2.0, 3.0], 0.0, 0.0);
+        assert_eq!(d.world().created, listed + 1);
     }
 
     #[test]
