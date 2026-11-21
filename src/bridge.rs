@@ -401,8 +401,7 @@ impl Bridge {
                     self.counters.players_over_limit += 1;
                     continue;
                 }
-                let entity = self.next_entity;
-                self.next_entity = self.next_entity.wrapping_add(1);
+                let entity = self.allocate_entity();
                 self.tracked.insert(
                     p.key.clone(),
                     Tracked {
@@ -436,6 +435,18 @@ impl Bridge {
                 self.counters.poses_sent += n;
             }
         }
+    }
+
+    /// The next entity id for a player: the one after the last given, skipping ids that players still online
+    /// hold, so the counter wrapping round (from a `guest_entity` near `u32::MAX`) never gives two players one id.
+    /// At most `MAX_ENTITIES` ids are held, so the search ends.
+    fn allocate_entity(&mut self) -> u32 {
+        let mut entity = self.next_entity;
+        while self.tracked.values().any(|t| t.entity == entity) {
+            entity = entity.wrapping_add(1);
+        }
+        self.next_entity = entity.wrapping_add(1);
+        entity
     }
 
     fn drive_collision(&mut self, link: &mut Link, t: &mut Tick<'_>) {
@@ -813,6 +824,39 @@ mod tests {
         assert_eq!(endpoint_mode_warning(false, Role::Host, true), None);
         assert_eq!(endpoint_mode_warning(true, Role::Guest, true), None);
         assert_eq!(endpoint_mode_warning(true, Role::Host, false), None);
+    }
+
+    #[test]
+    fn entity_ids_wrap_round_but_skip_the_ones_still_held() {
+        let mut b = Bridge::new(
+            Config {
+                guest_entity: u32::MAX,
+                ..Config::default()
+            },
+            PathBuf::from("endpoint.json"),
+        );
+        let hold = |b: &mut Bridge, key: &str| {
+            let entity = b.allocate_entity();
+            b.tracked.insert(
+                key.into(),
+                Tracked {
+                    entity,
+                    name: key.into(),
+                    spawned: true,
+                    last: None,
+                },
+            );
+            entity
+        };
+        assert_eq!(hold(&mut b, "a"), u32::MAX);
+        assert_eq!(hold(&mut b, "b"), 0);
+        assert_eq!(hold(&mut b, "c"), 1);
+        // the counter comes round to ids that "a" and "b" still hold
+        b.next_entity = u32::MAX;
+        assert_eq!(hold(&mut b, "d"), 2);
+        b.tracked.remove("b");
+        b.next_entity = u32::MAX;
+        assert_eq!(hold(&mut b, "e"), 0, "a freed id is given again");
     }
 
     #[test]
