@@ -47,14 +47,20 @@ pub struct RawGuest {
 impl RawGuest {
     /// Connects to the bridge (a host) and completes the handshake by hand, ticking the bridge meanwhile.
     pub fn connect(b: &mut Bridge) -> Self {
+        Self::connect_as(b, "raw")
+    }
+
+    /// The same, announcing `game` in the `hello`.
+    pub fn connect_as(b: &mut Bridge, game: &str) -> Self {
         let port = b.control_port().unwrap();
         let mut tcp = TcpStream::connect(localhost(port)).unwrap();
         tcp.set_nonblocking(true).unwrap();
         let udp = UdpSocket::bind(localhost(0)).unwrap();
         udp.set_nonblocking(true).unwrap();
         let hello = format!(
-            "{{\"type\":\"hello\",\"role\":\"guest\",\"game\":\"raw\",\"protocol\":1,\"min_protocol\":1,\
+            "{{\"type\":\"hello\",\"role\":\"guest\",\"game\":{},\"protocol\":1,\"min_protocol\":1,\
              \"udp_port\":{},\"heartbeat_ms\":250,\"timeout_ms\":2000}}\n",
+            serde_json::to_string(game).unwrap(),
             udp.local_addr().unwrap().port()
         );
         tcp.write_all(hello.as_bytes()).unwrap();

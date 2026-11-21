@@ -61,6 +61,10 @@ console always may).
 | `/link stop` | `bye`, half-close, drain 200 ms, close; the endpoint file is removed |
 | `/link focus host\|guest` | host only: give the input focus or take it back |
 
+Text that comes from the other program (the name of its game, the reason it gave for ending a session) is shown
+with every control character, line separator and bidirectional control replaced by a space and cut to 128
+characters, so a peer cannot write forged lines or terminal escapes into the console or a player's chat.
+
 ## Config: `plugins/data/pumpkin-link/pumpkin-link.json`
 
 Modelled on `config/minecraft-link.json` of [minecraft-link](https://github.com/patodois/minecraft-link);

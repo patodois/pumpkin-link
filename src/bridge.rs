@@ -36,6 +36,28 @@ pub const SCAN_LAYERS_PER_TICK: usize = 1;
 /// A snapshot that did not change is sent again after this long (as `minecraft-link` does).
 pub const COLLISION_REFRESH: Duration = Duration::from_secs(5);
 
+/// The most characters of one text from the peer (its `game`, the reason it gave) that the bridge keeps.
+pub const MAX_PEER_TEXT_CHARS: usize = 128;
+
+/// Text that came from the peer, made fit for a player's chat, the console and a log: every control character
+/// (C0, DEL and C1), the line and paragraph separators and the bidirectional controls become a space, and the
+/// text is cut to [`MAX_PEER_TEXT_CHARS`] characters, with `...` at the end when it was cut. The library already
+/// replaces C0 and DEL (contract revision 8); the rest, and the length, are the plugin's own: a peer line may be
+/// 64 KiB long.
+pub fn clean_peer_text(s: &str) -> String {
+    let mut out = String::with_capacity(s.len().min(MAX_PEER_TEXT_CHARS * 4 + 3));
+    for (i, c) in s.chars().enumerate() {
+        if i == MAX_PEER_TEXT_CHARS {
+            out.push_str("...");
+            break;
+        }
+        let unsafe_char = c.is_control()
+            || matches!(c, '\u{2028}' | '\u{2029}' | '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}');
+        out.push(if unsafe_char { ' ' } else { c });
+    }
+    out
+}
+
 /// One online player, as the server reports it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PlayerSample {
@@ -280,7 +302,8 @@ impl Bridge {
             }
             Event::Lost { reason } => {
                 self.counters.lost += 1;
-                self.last_lost = Some(reason);
+                // may hold the peer's own `bye` reason
+                self.last_lost = Some(clean_peer_text(&reason));
                 guests.clear();
                 self.peer_entities.clear();
                 self.focus_with_guest = false;
@@ -293,7 +316,7 @@ impl Bridge {
                     self.counters.refused_unauthorized += 1;
                 } else {
                     self.counters.handshake_failed += 1;
-                    self.last_problem = Some(reason);
+                    self.last_problem = Some(clean_peer_text(&reason));
                 }
             }
             Event::Spawn(s) => {
@@ -514,7 +537,7 @@ impl Bridge {
             Some(p) if link.is_connected() => {
                 out.push(format!(
                     "peer: {} ({}), protocol {}, session {}, udp {}",
-                    p.game,
+                    clean_peer_text(&p.game),
                     if p.role == link::Role::Host {
                         "host"
                     } else {
@@ -574,7 +597,7 @@ impl Bridge {
         ));
         out.push(format!("sessions: {}, lost: {}", c.sessions, c.lost));
         if let Some(e) = link.last_error() {
-            out.push(format!("connection: {e}"));
+            out.push(format!("connection: {}", clean_peer_text(e)));
         }
         if let Some(r) = &self.last_lost {
             out.push(format!("last session ended: {r}"));
@@ -719,6 +742,26 @@ mod tests {
         let p = make_pose(&map, &mut tr, &sample(0.0, 90.0), Instant::now());
         let f = crate::mapping::rotate_z(p.rotation);
         assert!((f[0] + 1.0).abs() < 1e-5, "{f:?}");
+    }
+
+    #[test]
+    fn peer_text_loses_every_control_character_and_is_cut() {
+        let evil = "a\u{1b}[31mb\nFORGED\r\u{7f}\u{85}\u{9b}2J\u{2028}\u{202e}\u{2066}\0z";
+        let c = clean_peer_text(evil);
+        assert_eq!(c, "a [31mb FORGED    2J    z");
+        assert!(!c.chars().any(char::is_control));
+        let long = "\u{e9}".repeat(70_000);
+        let c = clean_peer_text(&long);
+        assert_eq!(c.chars().count(), MAX_PEER_TEXT_CHARS + 3);
+        assert!(c.ends_with("..."));
+        assert_eq!(
+            clean_peer_text(&"x".repeat(MAX_PEER_TEXT_CHARS)).len(),
+            MAX_PEER_TEXT_CHARS
+        );
+        assert_eq!(
+            clean_peer_text("Minecraft (Pumpkin server)"),
+            "Minecraft (Pumpkin server)"
+        );
     }
 
     #[test]
