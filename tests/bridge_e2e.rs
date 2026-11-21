@@ -213,8 +213,9 @@ fn host_without_token_spawns_players_sends_poses_and_collision() {
     ));
     let status = b.status().join("\n");
     assert!(status.contains("host on 127.0.0.1"), "{status}");
+    // the host's status names its peer: the guest's game and role
     assert!(
-        status.contains("Minecraft (Pumpkin server)") || status.contains("test guest"),
+        status.contains("peer: test guest (guest), protocol 1,"),
         "{status}"
     );
     b.stop(&mut sink);
@@ -247,11 +248,8 @@ fn guest_entities_reach_the_sink_and_go_away_with_the_session() {
     p.rotation = pumpkin_link::mapping::Mapping::default().rotation(-90.0, 0.0);
     std::thread::sleep(Duration::from_millis(20));
     peer.send_poses(&[p]).unwrap();
-    assert!(pump(&mut b, &mut peer, &[], &mut sink, &mut ev, |_, _| {
-        true
-    }));
     // let the pose arrive
-    for _ in 0..40 {
+    for _ in 0..400 {
         let mut w = OneWorld(Floor);
         b.tick(Tick {
             now: Instant::now(),
@@ -436,6 +434,10 @@ fn guest_role_publishes_players_to_a_real_host_with_and_without_token() {
             format!("link: guest, connecting to 127.0.0.1:{port}")
         };
         assert!(status.contains(&head), "{status}");
+        assert!(
+            status.contains("peer: test host (host), protocol 1,"),
+            "{status}"
+        );
         assert!(status.contains("collision received"), "{status}");
         b.stop(&mut sink);
         drop(host);
