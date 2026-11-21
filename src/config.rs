@@ -123,6 +123,33 @@ fn int_of(o: &Map<String, Value>, k: &str, d: u64, lo: u64, hi: u64) -> Result<u
     }
 }
 
+/// What reading the config file gave.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Loaded {
+    /// The file was read and is valid.
+    Valid(Config),
+    /// There is no file: write [`Config::default_text`] there and use the defaults.
+    Missing,
+    /// The file exists but could not be read or has an error. It is left as it is, and the link does not start
+    /// (it fails closed: no host with the defaults, which have no token).
+    Broken(String),
+}
+
+impl Loaded {
+    /// From the result of reading the file as text. Only "not found" is a missing file: any other error (no
+    /// permission, text that is not UTF-8, a directory) is a broken one, so the file is never overwritten.
+    pub fn from_read(read: std::io::Result<String>) -> Self {
+        match read {
+            Ok(text) => match Config::parse(&text) {
+                Ok(c) => Self::Valid(c),
+                Err(e) => Self::Broken(e),
+            },
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Self::Missing,
+            Err(e) => Self::Broken(format!("cannot be read: {e}")),
+        }
+    }
+}
+
 impl Config {
     /// Parses the file's text. Errors name the key and never quote the file.
     pub fn parse(text: &str) -> Result<Self, String> {
@@ -277,5 +304,34 @@ mod tests {
         }
         assert!(Config::parse("[]").is_err());
         assert!(Config::parse("{").is_err());
+    }
+
+    #[test]
+    fn only_a_missing_file_is_replaced_by_the_defaults() {
+        use std::io::{Error, ErrorKind};
+        assert_eq!(
+            Loaded::from_read(Err(Error::from(ErrorKind::NotFound))),
+            Loaded::Missing
+        );
+        // a file saved as UTF-16, one without read permission, a directory: never overwritten
+        for kind in [
+            ErrorKind::InvalidData,
+            ErrorKind::PermissionDenied,
+            ErrorKind::IsADirectory,
+            ErrorKind::Other,
+        ] {
+            assert!(
+                matches!(Loaded::from_read(Err(Error::from(kind))), Loaded::Broken(e) if e.contains("cannot be read")),
+                "{kind:?}"
+            );
+        }
+        assert!(matches!(
+            Loaded::from_read(Ok(r#"{"token_auth":true,"collision_radius":65}"#.into())),
+            Loaded::Broken(e) if e.contains("collision_radius")
+        ));
+        assert_eq!(
+            Loaded::from_read(Ok("{}".into())),
+            Loaded::Valid(Config::default())
+        );
     }
 }

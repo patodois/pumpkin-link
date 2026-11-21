@@ -141,6 +141,8 @@ pub struct Bridge {
     pub counters: Counters,
     last_problem: Option<String>,
     last_lost: Option<String>,
+    /// The config file could not be read or has an error: the link never starts (it fails closed).
+    config_error: Option<String>,
 }
 
 impl Bridge {
@@ -161,7 +163,16 @@ impl Bridge {
             counters: Counters::default(),
             last_problem: None,
             last_lost: None,
+            config_error: None,
         }
+    }
+
+    /// A bridge for a config file that could not be read or has an error: it shows the error in the status
+    /// and refuses to start, so a broken file never gives a link with the defaults (which have no token).
+    pub fn broken_config(error: String, endpoint_path: PathBuf) -> Self {
+        let mut b = Self::new(Config::default(), endpoint_path);
+        b.config_error = Some(error);
+        b
     }
 
     pub fn config(&self) -> &Config {
@@ -186,6 +197,11 @@ impl Bridge {
 
     /// Starts `role`. Errors say what failed and never contain the token.
     pub fn start(&mut self, role: Role) -> Result<(), String> {
+        if let Some(e) = &self.config_error {
+            return Err(format!(
+                "the link does not start while the config file has an error ({e}); fix the file and restart the server"
+            ));
+        }
         if self.link.is_some() {
             return Err("the link is already running; stop it first".into());
         }
@@ -457,6 +473,13 @@ impl Bridge {
     /// The lines of `/link status`. The token is never in them.
     pub fn status(&self) -> Vec<String> {
         let mut out = Vec::new();
+        if let Some(e) = &self.config_error {
+            out.push(format!(
+                "config: {e}; the file was left as it is and the link does not start until it is fixed \
+                 and the server restarted"
+            ));
+            return out;
+        }
         let Some(link) = &self.link else {
             out.push(format!(
                 "link: stopped (configured role {}, control port {})",
@@ -696,6 +719,22 @@ mod tests {
         let p = make_pose(&map, &mut tr, &sample(0.0, 90.0), Instant::now());
         let f = crate::mapping::rotate_z(p.rotation);
         assert!((f[0] + 1.0).abs() < 1e-5, "{f:?}");
+    }
+
+    #[test]
+    fn a_broken_config_never_starts_a_link() {
+        let mut b = Bridge::broken_config(
+            "\"collision_radius\" must be a whole number from 1 to 64".into(),
+            PathBuf::from("endpoint.json"),
+        );
+        for role in [Role::Host, Role::Guest] {
+            let e = b.start(role).unwrap_err();
+            assert!(e.contains("collision_radius"), "{e}");
+            assert!(!b.is_running());
+        }
+        let status = b.status().join("\n");
+        assert!(status.starts_with("config: "), "{status}");
+        assert!(status.contains("does not start"), "{status}");
     }
 
     #[test]

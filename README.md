@@ -45,7 +45,8 @@ cp target/wasm32-wasip2/release/pumpkin_link.wasm  <server>/plugins/
 
 Start the server once. The plugin writes `plugins/data/pumpkin-link/pumpkin-link.json` with every
 setting at its default and does **not** start the link: it opens no port until you ask, with
-`"auto_start": true` or `/link host` / `/link guest`.
+`"auto_start": true` or `/link host` / `/link guest`. The file is written only when there is none: a file
+that exists but cannot be read (no permission, text that is not UTF-8) or has an error is never overwritten.
 
 ## Commands
 
@@ -63,8 +64,11 @@ console always may).
 ## Config: `plugins/data/pumpkin-link/pumpkin-link.json`
 
 Modelled on `config/minecraft-link.json` of [minecraft-link](https://github.com/patodois/minecraft-link);
-only the keys that apply to a server are here, unknown keys are ignored, a key of the wrong type or out
-of range stops the link from starting and is named in `/link status`.
+only the keys that apply to a server are here, unknown keys are ignored. A file that cannot be read, is not
+valid JSON, or has a key of the wrong type or out of range is left as it is, logged, and named in `/link status`,
+and the link does not start at all, neither with `auto_start` nor with `/link host` or `/link guest`, until the
+file is fixed and the server restarted: the plugin never runs a link with the defaults in place of a file it
+could not use.
 
 | Key | Default | Meaning |
 |---|---|---|

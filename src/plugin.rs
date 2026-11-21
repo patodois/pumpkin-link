@@ -5,7 +5,7 @@
 
 use crate::bridge::{Bridge, GuestSink, PlayerSample, Tick, Worlds};
 use crate::collision::{BlockSource, Cell};
-use crate::config::{Config, Role};
+use crate::config::{Config, Loaded, Role};
 use crate::displays::{DisplayWorld, Displays, Found, KEY, NAMESPACE, Tag};
 use pumpkin_plugin_api::command::{
     Command, CommandError, CommandNode, CommandSender, ConsumedArgs,
@@ -37,7 +37,6 @@ type CellCache = Rc<RefCell<HashMap<u16, Rc<Cell>>>>;
 
 struct State {
     bridge: Bridge,
-    config_error: Option<String>,
     /// Block state id to its cell, for states that are air, have no shape, or are a full cube.
     cells: CellCache,
     guests: DisplaySink,
@@ -351,14 +350,7 @@ impl CommandHandler for Status {
         _s: Server,
         _a: ConsumedArgs,
     ) -> Result<i32, CommandError> {
-        let lines = with_state(|st| {
-            let mut l = Vec::new();
-            if let Some(e) = &st.config_error {
-                l.push(format!("config: {e} (defaults in use)"));
-            }
-            l.extend(st.bridge.status());
-            l
-        })?;
+        let lines = with_state(|st| st.bridge.status())?;
         for l in lines {
             say(&sender, &l);
         }
@@ -450,20 +442,22 @@ impl Plugin for PumpkinLink {
     fn on_load(&self, context: Context) -> Result<(), String> {
         let dir = context.get_data_folder();
         let cfg_path = format!("{dir}/{CONFIG_FILE}");
-        let (cfg, config_error) = match std::fs::read_to_string(&cfg_path) {
-            Ok(text) => match Config::parse(&text) {
-                Ok(c) => (c, None),
-                Err(e) => (Config::default(), Some(format!("{CONFIG_FILE}: {e}"))),
-            },
-            Err(_) => {
+        // Only a missing file is written; a file that cannot be read or has an error is left as it is, and the
+        // link does not start (`Bridge::broken_config`).
+        let (cfg, config_error) = match Loaded::from_read(std::fs::read_to_string(&cfg_path)) {
+            Loaded::Valid(c) => (c, None),
+            Loaded::Missing => {
                 if let Err(e) = std::fs::write(&cfg_path, Config::default_text()) {
                     tracing::warn!("pumpkin-link: cannot write {CONFIG_FILE}: {e}");
                 }
                 (Config::default(), None)
             }
+            Loaded::Broken(e) => (Config::default(), Some(format!("{CONFIG_FILE}: {e}"))),
         };
         if let Some(e) = &config_error {
-            tracing::error!("pumpkin-link: {e}; using the defaults and not starting the link");
+            tracing::error!(
+                "pumpkin-link: {e}; the file is left as it is and the link does not start until it is fixed"
+            );
         }
         let endpoint_name = if cfg.endpoint_file.is_empty() {
             ENDPOINT_FILE
@@ -480,7 +474,10 @@ impl Plugin for PumpkinLink {
                 "pumpkin-link: guest_block names no block of this server; guests are not shown"
             );
         }
-        let mut bridge = Bridge::new(cfg, endpoint);
+        let mut bridge = match config_error {
+            None => Bridge::new(cfg, endpoint),
+            Some(e) => Bridge::broken_config(e, endpoint),
+        };
         if auto {
             match bridge.start(role) {
                 Ok(()) => tracing::info!("pumpkin-link: started as {role:?}"),
@@ -490,7 +487,6 @@ impl Plugin for PumpkinLink {
         let task = context.schedule_repeating_task(1, 1, on_tick);
         *STATE.lock().unwrap_or_else(|e| e.into_inner()) = Some(State {
             bridge,
-            config_error,
             cells: CellCache::default(),
             guests,
             task: Some(task),
