@@ -1,4 +1,4 @@
-# pumpkin-link
+<h1 align="center"><img src="docs/title.png" alt="pumpkin-link" width="418"></h1>
 
 A plugin for the [Pumpkin](https://github.com/Pumpkin-MC/Pumpkin) Minecraft server that speaks the
 rewrite-bridge passthrough link protocol (`docs/CONTRACT.md`, protocol v1 revision 8, with the optional token of
